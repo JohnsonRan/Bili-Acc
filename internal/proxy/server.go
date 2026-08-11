@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	maxPlaylistSize = 1 << 20
+	maxPlaylistSize = 4 << 20
 	copyBufferSize  = 32 << 10
 )
 
