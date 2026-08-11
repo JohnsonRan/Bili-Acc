@@ -129,7 +129,7 @@ func allowedPlayurlHost(target *url.URL) bool {
 }
 
 func allowedPlayurl(target *url.URL) bool {
-	if !allowedPlayurlHost(target) {
+	if target.Scheme != "https" || !allowedPlayurlHost(target) {
 		return false
 	}
 	for _, pattern := range playurlPaths {

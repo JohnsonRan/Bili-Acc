@@ -7,11 +7,11 @@ import (
 	"errors"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -66,7 +66,7 @@ func TestPlayurlProxyForwardsCookie(t *testing.T) {
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
 	app.client.Transport = transportTo(upstream)
 
-	target := "http://api.bilibili.com/x/player/wbi/playurl?bvid=BV1&cid=1"
+	target := "https://api.bilibili.com/x/player/playurl?bvid=BV1&cid=1"
 	request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, target), nil)
 	request.Header.Set("X-Bili-Cookie", "SESSDATA=secret")
 	request.Header.Set("X-Bili-Referer", "https://www.bilibili.com/video/BV1")
@@ -75,6 +75,193 @@ func TestPlayurlProxyForwardsCookie(t *testing.T) {
 
 	if response.Code != http.StatusOK || response.Body.String() != `{"code":0}` {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestPlayurlRequestsHighestQualityWithoutChangingResponseMetadata(t *testing.T) {
+	upstreamBody := `{"code":0,"data":{"quality":80,"accept_quality":[127,120,80]}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		for name, expected := range map[string]string{"qn": "127", "fnver": "0", "fnval": "4048", "fourk": "1"} {
+			if got := query.Get(name); got != expected {
+				t.Errorf("%s = %q", name, got)
+			}
+		}
+		_, _ = io.WriteString(w, upstreamBody)
+	}))
+	defer upstream.Close()
+
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.client.Transport = transportTo(upstream)
+	target := "https://api.bilibili.com/x/player/playurl?bvid=BV1&cid=1&qn=80"
+	request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, target), nil)
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != upstreamBody {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestWBIPlayurlQualityUpgradeRefreshesAndCachesSignature(t *testing.T) {
+	var navRequests int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/web-interface/nav":
+			navRequests++
+			if got := r.Header.Get("Cookie"); got != "SESSDATA=secret" {
+				t.Errorf("nav Cookie = %q", got)
+			}
+			_, _ = io.WriteString(w, `{"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png","sub_url":"https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"}}}`)
+		case "/x/player/wbi/playurl":
+			query := r.URL.Query()
+			if query.Get("qn") != "127" || query.Get("fnval") != "4048" || query.Get("fourk") != "1" {
+				t.Errorf("quality query = %q", r.URL.RawQuery)
+			}
+			if query.Get("wts") != "1702204169" || query.Get("w_rid") != "8c4e938a1620d52d755a44c5e7262549" {
+				t.Errorf("WBI query = %q", r.URL.RawQuery)
+			}
+			_, _ = io.WriteString(w, `{"code":0}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.now = func() time.Time { return time.Unix(1702204169, 0) }
+	app.client.Transport = transportTo(upstream)
+	target := "https://api.bilibili.com/x/player/wbi/playurl?bvid=BV1&cid=1&qn=80&w_rid=old&wts=1"
+	for range 2 {
+		request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, target), nil)
+		request.Header.Set("X-Bili-Cookie", "SESSDATA=secret")
+		response := httptest.NewRecorder()
+		app.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%q", response.Code, response.Body.String())
+		}
+	}
+	if navRequests != 1 {
+		t.Fatalf("nav requests = %d", navRequests)
+	}
+}
+
+func TestWBIRefreshFailureFallsBackToOriginalRequest(t *testing.T) {
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.wbiFetchTimeout = 20 * time.Millisecond
+	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/x/web-interface/nav":
+			<-request.Context().Done()
+			return nil, request.Context().Err()
+		case "/x/player/wbi/playurl":
+			query := request.URL.Query()
+			if query.Get("qn") != "80" || query.Get("w_rid") != "old" || query.Get("wts") != "1" {
+				t.Errorf("fallback query = %q", request.URL.RawQuery)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":0}`)),
+				Request:    request,
+			}, nil
+		default:
+			return nil, errors.New("unexpected request")
+		}
+	})
+	target := "https://api.bilibili.com/x/player/wbi/playurl?bvid=BV1&cid=1&qn=80&w_rid=old&wts=1"
+	request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, target), nil)
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != `{"code":0}` {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestWBIRefreshIsSharedAcrossConcurrentRequests(t *testing.T) {
+	var navRequests atomic.Int32
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		navRequests.Add(1)
+		started <- struct{}{}
+		<-release
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png","sub_url":"https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"}}}`)),
+			Request:    request,
+		}, nil
+	})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := app.getWBIKey(context.Background(), nil)
+			results <- err
+		}()
+	}
+	<-started
+	time.Sleep(10 * time.Millisecond)
+	close(release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := navRequests.Load(); got != 1 {
+		t.Fatalf("nav requests = %d", got)
+	}
+}
+
+func TestWBIRejectsMalformedKeys(t *testing.T) {
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/not-hex.png","sub_url":"https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"}}}`)),
+			Request:    request,
+		}, nil
+	})
+	if _, err := app.getWBIKey(context.Background(), nil); err == nil {
+		t.Fatal("malformed WBI key was accepted")
+	}
+	if app.wbiMixinKey != "" {
+		t.Fatal("malformed WBI key was cached")
+	}
+}
+
+func TestSignWBIKnownVector(t *testing.T) {
+	values := url.Values{"foo": {"114"}, "bar": {"514"}, "zab": {"1919810"}}
+	signed := signWBI(values, "ea1db124af3c7062474693fa704f4ff8", 1702204169)
+	if got := signed.Get("w_rid"); got != "8f6f2b5b3d485fe1886cec6a0be8c5d4" {
+		t.Fatalf("w_rid = %q", got)
+	}
+	if got := signed.Get("wts"); got != "1702204169" {
+		t.Fatalf("wts = %q", got)
+	}
+	encoded := encodeQuery(signWBI(url.Values{"space": {"one two"}, "filtered": {"!'()*"}}, "ea1db124af3c7062474693fa704f4ff8", 1702204169))
+	if !strings.Contains(encoded, "space=one%20two") || !strings.Contains(encoded, "filtered=") || strings.ContainsAny(encoded, "!'()*") {
+		t.Fatalf("encoded query = %q", encoded)
+	}
+}
+
+func TestLivePlayurlRequestsHighestQuality(t *testing.T) {
+	tests := []struct {
+		path  string
+		name  string
+		value string
+	}{
+		{"/xlive/web-room/v2/index/getRoomPlayInfo", "qn", "10000"},
+		{"/room/v1/Room/playUrl", "quality", "4"},
+	}
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	for _, test := range tests {
+		target, _ := url.Parse("https://api.live.bilibili.com" + test.path + "?room_id=1")
+		upgraded, ok, err := app.highestQualityTarget(context.Background(), target, nil)
+		if err != nil || !ok || upgraded.Query().Get(test.name) != test.value {
+			t.Fatalf("path=%s upgraded=%v ok=%t err=%v", test.path, upgraded, ok, err)
+		}
 	}
 }
 
@@ -250,11 +437,20 @@ func TestCopyResponseHeadersDropsConnectionExtensions(t *testing.T) {
 	}
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
 func transportTo(upstream *httptest.Server) http.RoundTripper {
-	dialer := &net.Dialer{}
-	return &http.Transport{
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, upstream.Listener.Addr().String())
-		},
-	}
+	base, _ := url.Parse(upstream.URL)
+	transport := upstream.Client().Transport
+	return roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		forwarded := request.Clone(request.Context())
+		forwarded.URL.Scheme = base.Scheme
+		forwarded.URL.Host = base.Host
+		forwarded.Host = request.URL.Host
+		return transport.RoundTrip(forwarded)
+	})
 }

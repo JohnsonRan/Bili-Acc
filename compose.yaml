@@ -8,4 +8,4 @@ services:
       PUBLIC_URL: https://${DOMAIN}
       ALLOWED_HOSTS: bilivideo.com,bilivideo.cn,biliapi.net,akamaized.net
     ports:
-      - "127.0.0.1:8964:8080"
+      - "127.0.0.1:8080:8080"

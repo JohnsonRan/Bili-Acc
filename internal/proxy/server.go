@@ -25,11 +25,17 @@ var copyBufferPool = sync.Pool{
 }
 
 type server struct {
-	token      string
-	publicURL  string
-	mediaHosts []string
-	client     *http.Client
-	logger     *log.Logger
+	token           string
+	publicURL       string
+	mediaHosts      []string
+	client          *http.Client
+	logger          *log.Logger
+	now             func() time.Time
+	wbiMu           sync.Mutex
+	wbiMixinKey     string
+	wbiKeyExpires   time.Time
+	wbiRefresh      chan struct{}
+	wbiFetchTimeout time.Duration
 }
 
 type requestLog struct {
@@ -37,6 +43,7 @@ type requestLog struct {
 	targetHost     string
 	upstreamStatus int
 	streamError    bool
+	highestQuality bool
 }
 
 type loggingResponseWriter struct {
@@ -76,10 +83,12 @@ func newServer(token, publicURL string, mediaHosts []string) *server {
 		KeepAlive: 30 * time.Second,
 	}
 	return &server{
-		token:      token,
-		publicURL:  strings.TrimRight(publicURL, "/"),
-		mediaHosts: normalizeHosts(mediaHosts),
-		logger:     log.Default(),
+		token:           token,
+		publicURL:       strings.TrimRight(publicURL, "/"),
+		mediaHosts:      normalizeHosts(mediaHosts),
+		logger:          log.Default(),
+		now:             time.Now,
+		wbiFetchTimeout: 3 * time.Second,
 		client: &http.Client{
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
@@ -112,9 +121,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		s.logger.Printf("request method=%s route=%s target_host=%q status=%d upstream_status=%d bytes=%d duration_ms=%d range=%t stream_error=%t remote=%q",
+		s.logger.Printf("request method=%s route=%s target_host=%q status=%d upstream_status=%d bytes=%d duration_ms=%d range=%t stream_error=%t highest_quality=%t remote=%q",
 			r.Method, meta.route, meta.targetHost, status, meta.upstreamStatus, loggedWriter.bytes,
-			time.Since(started).Milliseconds(), r.Header.Get("Range") != "", meta.streamError, clientIP(r))
+			time.Since(started).Milliseconds(), r.Header.Get("Range") != "", meta.streamError, meta.highestQuality, clientIP(r))
 	}()
 	w = loggedWriter
 
@@ -237,6 +246,15 @@ func (s *server) handlePlayurl(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	qualityCtx, qualityCancel := context.WithTimeout(ctx, s.wbiFetchTimeout)
+	upgradedTarget, upgraded, upgradeErr := s.highestQualityTarget(qualityCtx, target, headers)
+	qualityCancel()
+	if upgradeErr != nil {
+		s.logger.Printf("quality_upgrade_failed target_host=%q", target.Hostname())
+	} else if upgraded {
+		target = upgradedTarget
+		meta.highestQuality = true
+	}
 	response, _, err := s.fetchAllowed(ctx, r.Method, target, headers, allowedPlayurl)
 	if err != nil {
 		http.Error(w, "Upstream request failed", http.StatusBadGateway)

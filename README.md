@@ -12,11 +12,11 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-容器仅监听 `127.0.0.1:8964`。宿主机 Caddy：
+容器仅监听 `127.0.0.1:8080`。宿主机 Caddy：
 
 ```caddyfile
 bili.example.com {
-	reverse_proxy 127.0.0.1:8964 {
+	reverse_proxy 127.0.0.1:8080 {
 		flush_interval -1
 	}
 }
@@ -64,6 +64,7 @@ node --check userscript/bili-cf-acc.user.js
 
 ## 备注
 
+- playurl 请求会提升到账号可用的最高画质并重签 WBI；响应元数据和清晰度列表保持上游原样。
 - 普通媒体使用固定缓冲区流式转发；HLS playlist 最大 1 MiB。
 - 不缓存媒体和 Range 响应。
 - HTTP/3 由宿主机 Caddy 提供，公网需放行 UDP 443。
