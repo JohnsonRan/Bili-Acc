@@ -51,7 +51,7 @@ func (s *server) targetFromRequest(r *http.Request, prefix string) (*url.URL, er
 		return nil, errors.New("invalid origin")
 	}
 	origin, err := url.Parse(string(originBytes))
-	if err != nil || (origin.Scheme != "http" && origin.Scheme != "https") || origin.Host == "" || origin.User != nil || origin.Port() != "" || origin.Path != "" || origin.RawQuery != "" {
+	if err != nil || (origin.Scheme != "http" && origin.Scheme != "https") || origin.Host == "" || origin.User != nil || origin.Port() != "" || origin.Path != "" || origin.RawQuery != "" || !validDNSHostname(origin.Hostname()) {
 		return nil, errors.New("invalid origin")
 	}
 	path := "/"
@@ -126,7 +126,10 @@ func closeRedirectBody(response *http.Response) {
 }
 
 func allowedHost(hostname string, suffixes []string) bool {
-	name := strings.ToLower(strings.TrimSuffix(hostname, "."))
+	name, ok := normalizeDNSHostname(hostname)
+	if !ok {
+		return false
+	}
 	for _, suffix := range suffixes {
 		if name == suffix || strings.HasSuffix(name, "."+suffix) {
 			return true
@@ -136,8 +139,8 @@ func allowedHost(hostname string, suffixes []string) bool {
 }
 
 func allowedPlayurlHost(target *url.URL) bool {
-	host := strings.ToLower(target.Hostname())
-	return host == "api.bilibili.com" || host == "api.live.bilibili.com"
+	host, ok := normalizeDNSHostname(target.Hostname())
+	return ok && (host == "api.bilibili.com" || host == "api.live.bilibili.com")
 }
 
 func allowedPlayurl(target *url.URL) bool {
@@ -156,7 +159,10 @@ func allowedGRPCPlayurl(target *url.URL) bool {
 	if target.Scheme != "https" || target.Path != grpcPlayurlPath {
 		return false
 	}
-	host := strings.ToLower(target.Hostname())
+	host, ok := normalizeDNSHostname(target.Hostname())
+	if !ok {
+		return false
+	}
 	for _, allowed := range grpcPlayurlHosts {
 		if host == allowed {
 			return true
@@ -179,12 +185,50 @@ func isRedirect(status int) bool {
 func normalizeHosts(hosts []string) []string {
 	normalized := make([]string, 0, len(hosts))
 	for _, host := range hosts {
-		host = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(host), "."))
-		if host != "" {
-			normalized = append(normalized, host)
+		host = strings.TrimPrefix(strings.TrimSpace(host), ".")
+		if value, ok := normalizeDNSHostname(host); ok {
+			normalized = append(normalized, value)
 		}
 	}
 	return normalized
+}
+
+func validDNSHostname(hostname string) bool {
+	_, ok := normalizeDNSHostname(hostname)
+	return ok
+}
+
+func normalizeDNSHostname(hostname string) (string, bool) {
+	name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(hostname), "."))
+	if name == "" || len(name) > 253 {
+		return "", false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) == 0 || len(label) > 63 || !isDNSAlphaNumeric(label[0]) || !isDNSAlphaNumeric(label[len(label)-1]) {
+			return "", false
+		}
+		for index := 1; index < len(label)-1; index++ {
+			character := label[index]
+			if !isDNSAlphaNumeric(character) && character != '-' {
+				return "", false
+			}
+		}
+	}
+	return name, true
+}
+
+func isDNSAlphaNumeric(character byte) bool {
+	return character >= 'a' && character <= 'z' || character >= '0' && character <= '9'
+}
+
+func diagnosticHost(hostname string) string {
+	if value, ok := normalizeDNSHostname(hostname); ok {
+		return value
+	}
+	if strings.TrimSpace(hostname) == "" {
+		return ""
+	}
+	return "invalid-host"
 }
 
 func splitHosts(value string) []string {

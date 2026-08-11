@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -263,7 +263,7 @@ func TestPlayurlRequestsHighestQualityWithoutChangingResponseMetadata(t *testing
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
 	app.client.Transport = transportTo(upstream)
 	var logs bytes.Buffer
-	app.logger = log.New(&logs, "", 0)
+	app.logger = testLogger(&logs)
 	target := "https://api.bilibili.com/x/player/playurl?bvid=BV1&cid=1&qn=80"
 	request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, target), nil)
 	response := httptest.NewRecorder()
@@ -322,7 +322,7 @@ func TestWBIPlayurlQualityUpgradeRefreshesAndCachesSignature(t *testing.T) {
 func TestWBIRefreshFailureFallsBackToOriginalRequest(t *testing.T) {
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
 	var logs bytes.Buffer
-	app.logger = log.New(&logs, "", 0)
+	app.logger = testLogger(&logs)
 	app.wbiFetchTimeout = 20 * time.Millisecond
 	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
@@ -351,7 +351,7 @@ func TestWBIRefreshFailureFallsBackToOriginalRequest(t *testing.T) {
 	if response.Code != http.StatusOK || response.Body.String() != `{"code":0}` {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
-	if got := logs.String(); !strings.Contains(got, "quality_upgrade_failed") || !strings.Contains(got, "quality_params=failed") {
+	if got := logs.String(); strings.Count(got, "event=request_complete") != 1 || !strings.Contains(got, "result=degraded") || !strings.Contains(got, "error_stage=quality_upgrade") || !strings.Contains(got, "quality_params=failed") {
 		t.Fatalf("failed quality log = %q", got)
 	}
 }
@@ -533,7 +533,8 @@ func TestRequestLogIsUsefulAndRedactsSecrets(t *testing.T) {
 
 	var output bytes.Buffer
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
-	app.logger = log.New(&output, "", 0)
+	app.logger = testLogger(&output)
+	app.logMediaSuccess = true
 	app.client.Transport = transportTo(upstream)
 	request := httptest.NewRequest(http.MethodGet, proxyPath("/proxy/", testToken, "http://cdn.bilivideo.com/video.m4s?secret=query-value"), nil)
 	request.Header.Set("Cookie", "SESSDATA=cookie-value")
@@ -542,7 +543,7 @@ func TestRequestLogIsUsefulAndRedactsSecrets(t *testing.T) {
 	app.ServeHTTP(response, request)
 
 	logged := output.String()
-	for _, expected := range []string{"route=media", `target_host="cdn.bilivideo.com"`, "status=206", "upstream_status=206", "bytes=1", "range=true", "stream_error=false"} {
+	for _, expected := range []string{"event=request_complete", "route=media", "target_host=cdn.bilivideo.com", "status=206", "upstream_status=206", "result=ok", "bytes=1", "range=true", "stream_result=complete"} {
 		if !strings.Contains(logged, expected) {
 			t.Fatalf("log missing %q: %q", expected, logged)
 		}
@@ -634,6 +635,17 @@ func TestCopyResponseHeadersDropsConnectionExtensions(t *testing.T) {
 	if destination.Get("Content-Type") != "video/mp4" {
 		t.Fatal("end-to-end header was removed")
 	}
+}
+
+func testLogger(writer io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, attribute slog.Attr) slog.Attr {
+			if attribute.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return attribute
+		},
+	}))
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

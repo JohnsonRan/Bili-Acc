@@ -4,7 +4,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -42,10 +42,10 @@ func startFlightRecorder(directory string) (func(), error) {
 			case <-traceSignals:
 				path, err := writeFlightRecording(directory, recorder)
 				if err != nil {
-					log.Printf("flight recording failed: %v", err)
+					slog.Error("flight recording failed", "event", "flight_recording_failed", "error", err)
 					continue
 				}
-				log.Printf("flight recording written to %s", path)
+				slog.Info("flight recording written", "event", "flight_recording_written", "path", path)
 			case <-done:
 				return
 			}

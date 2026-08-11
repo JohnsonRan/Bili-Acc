@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bili-Acc Signal Room</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17201d;
+      --muted: #66716b;
+      --paper: #f2efe5;
+      --panel: rgba(255, 253, 246, .82);
+      --line: rgba(23, 32, 29, .16);
+      --signal: #e85d2a;
+      --signal-soft: #ffd7c7;
+      --good: #14785d;
+      --warn: #b44822;
+      --shadow: 0 18px 50px rgba(37, 45, 39, .11);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+      background:
+        linear-gradient(rgba(23,32,29,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23,32,29,.045) 1px, transparent 1px),
+        radial-gradient(circle at 12% 8%, #fff8dd 0, transparent 34%),
+        radial-gradient(circle at 88% 0%, #f3c4ad 0, transparent 31%),
+        var(--paper);
+      background-size: 28px 28px, 28px 28px, auto, auto, auto;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0 0 auto;
+      height: 5px;
+      background: linear-gradient(90deg, var(--signal) 0 22%, var(--ink) 22% 78%, var(--good) 78%);
+      z-index: 3;
+    }
+    main { width: min(1440px, calc(100% - 40px)); margin: 0 auto; padding: 42px 0 64px; }
+    header { display: flex; justify-content: space-between; gap: 28px; align-items: end; margin-bottom: 28px; }
+    .eyebrow, th, .label { font: 700 11px/1.2 "Courier New", monospace; letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: 6px 0 0; font: 800 clamp(34px, 6vw, 74px)/.9 Georgia, serif; letter-spacing: -.055em; }
+    .status { display: flex; align-items: center; gap: 9px; color: var(--muted); font: 600 12px "Courier New", monospace; }
+    .pulse { width: 9px; height: 9px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 5px rgba(20,120,93,.13); }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); backdrop-filter: blur(12px); }
+    .metric { grid-column: span 3; padding: 20px; min-height: 132px; display: flex; flex-direction: column; justify-content: space-between; }
+    .metric strong { font: 800 clamp(27px, 4vw, 45px)/1 "Courier New", monospace; letter-spacing: -.06em; }
+    .metric small { color: var(--muted); }
+    .windows { grid-column: span 7; padding: 22px; }
+    .statuses { grid-column: span 5; padding: 22px; }
+    .hosts, .errors { grid-column: 1 / -1; padding: 22px; overflow: hidden; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+    .section-head h2 { margin: 0; font: 700 24px Georgia, serif; }
+    .section-head span { color: var(--muted); font: 12px "Courier New", monospace; }
+    .window-row { display: grid; grid-template-columns: 55px 1fr 76px 90px; gap: 12px; align-items: center; margin: 16px 0; }
+    .track { height: 13px; background: #dedbd1; border-radius: 20px; overflow: hidden; }
+    .fill { height: 100%; background: linear-gradient(90deg, var(--good), #4cac89); border-radius: inherit; transition: width .45s ease; }
+    .number { text-align: right; font: 700 13px "Courier New", monospace; }
+    .status-list { display: grid; gap: 10px; }
+    .status-item { display: grid; grid-template-columns: 44px 1fr auto; gap: 12px; align-items: center; }
+    .status-code { font: 800 13px "Courier New", monospace; }
+    .status-bar { height: 8px; background: #dfdcd1; border-radius: 10px; overflow: hidden; }
+    .status-bar i { display: block; height: 100%; background: var(--signal); }
+    table { width: 100%; border-collapse: collapse; }
+    th { color: var(--muted); text-align: left; padding: 0 12px 10px; }
+    td { padding: 13px 12px; border-top: 1px solid var(--line); font-size: 13px; }
+    td:first-child { font-family: "Courier New", monospace; overflow-wrap: anywhere; }
+    td:not(:first-child), th:not(:first-child) { text-align: right; }
+    .danger { color: var(--warn); font-weight: 800; }
+    .empty { color: var(--muted); padding: 28px 12px; text-align: center; font-style: italic; }
+    .error-grid { display: grid; gap: 8px; }
+    .error-row { display: grid; grid-template-columns: 155px 120px minmax(180px, 1fr) 100px minmax(140px, 1fr); gap: 12px; padding: 11px 12px; border-top: 1px solid var(--line); font: 12px "Courier New", monospace; }
+    .error-row span { min-width: 0; overflow-wrap: anywhere; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    footer { margin-top: 18px; color: var(--muted); display: flex; justify-content: space-between; font: 11px "Courier New", monospace; }
+    @media (max-width: 920px) {
+      .metric { grid-column: span 6; }
+      .windows, .statuses { grid-column: 1 / -1; }
+      .error-row { grid-template-columns: 110px 95px minmax(150px, 1fr) 90px minmax(130px, 1fr); }
+    }
+    @media (max-width: 560px) {
+      main { width: min(100% - 22px, 1440px); padding-top: 28px; }
+      header { align-items: start; flex-direction: column; }
+      .metric { grid-column: 1 / -1; min-height: 108px; }
+      .window-row { grid-template-columns: 42px 1fr 65px; }
+      .window-row .number:last-child { display: none; }
+      .hosts, .errors, .windows, .statuses { padding: 17px; border-radius: 14px; }
+      table { min-width: 620px; }
+      .hosts { overflow-x: auto; }
+      .error-row { grid-template-columns: 1fr 1fr; gap: 12px 16px; padding: 14px 2px; }
+      .error-row span { display: grid; gap: 3px; }
+      .error-row span::before { content: attr(data-label); color: var(--muted); font: 700 9px/1.2 "Courier New", monospace; letter-spacing: .11em; text-transform: uppercase; }
+      .error-row span:nth-child(3), .error-row span:last-child { grid-column: 1 / -1; }
+      footer { flex-direction: column; gap: 5px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><div class="eyebrow">Fixed-egress operations</div><h1>Signal Room</h1></div>
+    <div class="status" role="status" aria-live="polite"><i class="pulse" aria-hidden="true"></i><span id="connection">CONNECTING</span></div>
+  </header>
+
+  <section class="grid">
+    <article class="panel metric"><span class="label">Active streams</span><strong id="active">—</strong><small>live media bodies</small></article>
+    <article class="panel metric"><span class="label">Throughput</span><strong id="throughput">—</strong><small>5-second moving rate</small></article>
+    <article class="panel metric"><span class="label">15m success</span><strong id="success">—</strong><small id="request-count">no completed requests</small></article>
+    <article class="panel metric"><span class="label">Header p95</span><strong id="latency">—</strong><small>upstream response start</small></article>
+
+    <article class="panel windows">
+      <div class="section-head"><h2>Rolling windows</h2><span>completion-based</span></div>
+      <div id="windows"></div>
+    </article>
+    <article class="panel statuses">
+      <div class="section-head"><h2>Status field</h2><span>last 15 minutes</span></div>
+      <div id="statuses" class="status-list"></div>
+      <div class="section-head" style="margin-top:24px"><h2>gRPC trailers</h2><span>status counts</span></div>
+      <div id="grpc" class="status-list"></div>
+    </article>
+
+    <article class="panel hosts">
+      <div class="section-head"><h2>CDN and upstream hosts</h2><span>errors sort first</span></div>
+      <table><caption class="sr-only">Upstream hosts ranked by recent errors and request volume</caption><thead><tr><th scope="col">Host</th><th scope="col">Requests</th><th scope="col">Errors</th><th scope="col">403</th><th scope="col">Error rate</th></tr></thead><tbody id="hosts"></tbody></table>
+    </article>
+
+    <article class="panel errors">
+      <div class="section-head"><h2>Recent sanitized errors</h2><span>maximum 100 · no URLs or client IPs</span></div>
+      <div id="errors" class="error-grid"></div>
+    </article>
+  </section>
+  <footer><span id="updated" role="status" aria-live="polite">Awaiting first snapshot</span><span id="uptime"></span></footer>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const text = (node, value) => { node.textContent = String(value); };
+  const pct = value => `${Number(value || 0).toFixed(1)}%`;
+  const rate = bits => {
+    const value = Number(bits || 0);
+    if (value >= 1e9) return `${(value / 1e9).toFixed(2)} Gb/s`;
+    if (value >= 1e6) return `${(value / 1e6).toFixed(1)} Mb/s`;
+    if (value >= 1e3) return `${(value / 1e3).toFixed(1)} Kb/s`;
+    return `${value} b/s`;
+  };
+  const duration = seconds => {
+    seconds = Number(seconds || 0);
+    const days = Math.floor(seconds / 86400); seconds %= 86400;
+    const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60);
+    return `${days ? days + 'd ' : ''}${hours}h ${minutes}m`;
+  };
+  function barList(target, entries, total) {
+    target.replaceChildren();
+    if (!entries.length) { const empty = document.createElement('div'); empty.className = 'empty'; text(empty, 'No data in this window'); target.append(empty); return; }
+    entries.forEach(([key, value]) => {
+      const row = document.createElement('div'); row.className = 'status-item';
+      const code = document.createElement('span'); code.className = 'status-code'; text(code, key);
+      const track = document.createElement('span'); track.className = 'status-bar';
+      const fill = document.createElement('i'); fill.style.width = `${Math.max(2, value / Math.max(total, 1) * 100)}%`; track.append(fill);
+      const count = document.createElement('span'); count.className = 'number'; text(count, value);
+      row.append(code, track, count); target.append(row);
+    });
+  }
+  function render(data) {
+    const fifteen = data.windows['15m'];
+    text($('active'), data.active_streams);
+    text($('throughput'), rate(data.throughput_bps));
+    text($('success'), pct(fifteen.success_rate));
+    text($('request-count'), `${fifteen.requests} completed · ${fifteen.client_cancelled} cancelled`);
+    text($('latency'), `${fifteen.upstream_header_p95_ms || 0} ms`);
+
+    const windows = $('windows'); windows.replaceChildren();
+    ['1m','5m','15m'].forEach(key => {
+      const item = data.windows[key]; const row = document.createElement('div'); row.className = 'window-row';
+      const name = document.createElement('span'); name.className = 'label'; text(name, key);
+      const track = document.createElement('span'); track.className = 'track'; const fill = document.createElement('i'); fill.className = 'fill'; fill.style.width = `${item.success_rate || 0}%`; track.append(fill);
+      const success = document.createElement('span'); success.className = 'number'; text(success, pct(item.success_rate));
+      const latency = document.createElement('span'); latency.className = 'number'; text(latency, `p95 ${item.upstream_header_p95_ms || 0}ms`);
+      row.append(name, track, success, latency); windows.append(row);
+    });
+
+    const statuses = Object.entries(fifteen.statuses || {}).sort((a,b) => b[1]-a[1]);
+    barList($('statuses'), statuses, fifteen.requests);
+    const grpc = Object.entries(data.grpc_statuses || {}).sort((a,b) => b[1]-a[1]);
+    barList($('grpc'), grpc, grpc.reduce((sum, item) => sum + item[1], 0));
+
+    const hosts = $('hosts'); hosts.replaceChildren();
+    if (!data.hosts.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = 5; cell.className = 'empty'; text(cell, 'No upstream hosts observed'); row.append(cell); hosts.append(row); }
+    data.hosts.forEach(host => {
+      const row = document.createElement('tr');
+      [host.host, host.requests, host.errors, host.status_403, pct(host.error_rate)].forEach((value, index) => { const cell = document.createElement('td'); text(cell, value); if (index > 1 && Number(host.errors) > 0) cell.className = 'danger'; row.append(cell); });
+      hosts.append(row);
+    });
+
+    const errors = $('errors'); errors.replaceChildren();
+    if (!data.recent_errors.length) { const empty = document.createElement('div'); empty.className = 'empty'; text(empty, 'No errors recorded since startup'); errors.append(empty); }
+    [...data.recent_errors].reverse().forEach(error => {
+      const row = document.createElement('div'); row.className = 'error-row';
+      const labels = ['Time', 'Route', 'Target host', 'HTTP / upstream', 'Result / gRPC'];
+      const values = [new Date(error.time).toLocaleTimeString(), error.route, error.target_host || '—', `${error.status}/${error.upstream_status}`, error.grpc_status ? `${error.result} · grpc ${error.grpc_status}` : error.result];
+      values.forEach((value, index) => { const span = document.createElement('span'); span.dataset.label = labels[index]; text(span, value); row.append(span); }); errors.append(row);
+    });
+    text($('updated'), `Updated ${new Date(data.generated_at).toLocaleTimeString()} · ${data.metrics_retention_seconds}s retention`);
+    text($('uptime'), `Uptime ${duration(data.uptime_seconds)}`);
+  }
+  async function refresh() {
+    try {
+      const response = await fetch('api/snapshot', {cache:'no-store'});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      render(await response.json()); text($('connection'), 'LIVE'); document.querySelector('.pulse').style.background = 'var(--good)';
+    } catch (_) {
+      text($('connection'), 'RETRYING'); document.querySelector('.pulse').style.background = 'var(--warn)';
+    }
+  }
+  refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>

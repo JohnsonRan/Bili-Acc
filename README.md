@@ -34,7 +34,7 @@ Bili-Acc 是使用 Go 编写的 B 站固定出口媒体代理。它将 playurl A
 
 ### 📊 运维与诊断
 
-- **结构化请求日志** — 记录路由、目标主机、状态码、字节数、耗时、Range 和流错误，不记录完整 URL、查询参数、Token 或 Cookie。
+- **聚合式可观测性** — `slog` 错误去重、周期流量汇总和同端口只读诊断页替代成功媒体请求刷屏，同时保持敏感信息脱敏。
 - **优雅关闭** — 收到 `SIGTERM` 或中断信号后，最多等待 30 秒完成已有请求。
 - **Go Flight Recorder** — Unix 环境可在内存中保留近期运行时事件，并通过 `SIGUSR1` 写出 trace。
 - **容器部署** — 提供多阶段 `Dockerfile` 和仅绑定回环地址的 Docker Compose 配置。
@@ -88,6 +88,12 @@ cp .env.example .env
 ```dotenv
 DOMAIN=bili.example.com
 TOKEN=replace-with-a-long-random-token
+LOG_FORMAT=text
+LOG_LEVEL=info
+LOG_MEDIA_SUCCESS=false
+LOG_SUMMARY_INTERVAL=60s
+LOG_ERROR_DEDUP_INTERVAL=10s
+LOG_CLIENT_IP=masked
 ```
 
 生成 Token 时应使用足够长的随机值，例如：
@@ -103,7 +109,7 @@ docker compose up -d --build
 docker compose logs -f app
 ```
 
-Compose 只将容器端口发布到 `127.0.0.1:8080`，不会直接暴露未加密的 HTTP 服务。
+Compose 只将应用发布到 `127.0.0.1:8080`。代理接口和只读诊断页共用该监听端口，由宿主机 Caddy 统一提供 HTTPS。
 
 ### 宿主机 Caddy
 
@@ -216,6 +222,12 @@ playlist 中出现不在媒体白名单内的目标时，整个请求返回 `502
 | `LISTEN_ADDR` | `:8080` | Go HTTP 服务监听地址。Compose 使用容器内默认值。 |
 | `PUBLIC_URL` | 从请求推断 | HLS 改写生成的公开服务地址。Compose 设置为 `https://${DOMAIN}`。 |
 | `ALLOWED_HOSTS` | B 站媒体域名 | 逗号分隔的媒体域名后缀白名单。 |
+| `LOG_FORMAT` | `text` | 日志格式，可选 `text` 或 `json`。 |
+| `LOG_LEVEL` | `info` | `debug`、`info`、`warn` 或 `error`。 |
+| `LOG_MEDIA_SUCCESS` | `false` | 是否逐条记录成功的媒体 `200/206` 请求。默认关闭以避免 Range 请求刷屏。 |
+| `LOG_SUMMARY_INTERVAL` | `60s` | 流量汇总周期，设为 `0` 关闭；非零值不得低于 `10s`。空闲周期不会输出。 |
+| `LOG_ERROR_DEDUP_INTERVAL` | `10s` | 相同安全错误键的日志去重周期，设为 `0` 关闭；非零值不得低于 `1s`。 |
+| `LOG_CLIENT_IP` | `masked` | 客户端 IP 日志策略：`full`、`masked` 或 `off`。输入必须能解析为 IP，否则记录 `unknown`；诊断页始终不展示 IP。 |
 | `TRACE_DIR` | 空 | 非空时在 Unix 环境启用 Flight Recorder，并将 trace 写入该目录。 |
 
 默认媒体域名后缀：
@@ -232,12 +244,12 @@ bilivideo.com,bilivideo.cn,biliapi.net,akamaized.net
 
 - 将 `TOKEN` 从 `.env` 注入容器；
 - 使用 `DOMAIN` 生成 `PUBLIC_URL`；
-- 将服务发布到 `127.0.0.1:8080`；
+- 将应用发布到 `127.0.0.1:8080`，代理与 `/diagnostics/` 只读诊断页共用该端口；
 - 将 `/traces` 挂载到 Docker 命名卷；
 - 使用 `unless-stopped` 自动重启策略；
 - 为已有媒体请求保留 40 秒容器停止宽限期。
 
-若修改宿主机回环端口，需要同步更新 `compose.yaml` 和 Caddyfile。不要将应用端口直接绑定到 `0.0.0.0`，除非另有防火墙和认证边界。
+若修改宿主机回环端口，需要同步更新 `compose.yaml` 和 Caddyfile。不要将应用端口直接绑定到 `0.0.0.0`。诊断页只展示脱敏、只读的运行指标，但没有内置登录功能；如果不希望公开 `/diagnostics/`，应由宿主机 Caddy 或 Cloudflare Access 对该路径增加认证或访问限制。
 
 ## 客户端
 
@@ -305,7 +317,9 @@ Token 位于代理 URL 路径中，因此以下位置可能看到完整请求路
 - 浏览器 Network 面板；
 - 客户端代理软件记录。
 
-应用自身只记录路由分类和目标主机，不记录完整 URL、查询参数、Token 或 Cookie。媒体请求额外记录 `range` 和 `stream_error`；playurl 请求记录 `quality_params=upgraded|failed|unchanged|not_attempted`，表示最高画质请求参数的处理状态，不代表响应最终提供的实际画质。若启用 Caddy access log，应对 `/playurl/` 和 `/proxy/` 路径进行脱敏，或关闭不必要的访问日志。
+应用使用标准库 `slog` 输出结构化事件，不记录完整 URL、查询参数、Token、Cookie、Authorization、原始 gRPC metadata 或 `grpc-message`。默认不逐条记录成功的媒体 `200/206` 请求，健康检查和 `OPTIONS` 也保持静默；playurl 与原生 gRPC 成功请求仍会记录。HTTP 失败、非零 gRPC status 和真实流错误会立即记录，相同的安全错误键在去重周期内只输出一次，并在下一次输出 `repeats_suppressed`。每个非空汇总周期输出一条 `traffic_summary`，包括请求数、成功/失败、流量、活动流、客户端取消、403 和上游响应头 p95。
+
+客户端主动退出、拖动或切换清晰度导致的中断计为 `client_cancelled`，不写入常规逐请求日志，也不与真实 `stream_error` 混淆；诊断页成功率的分子和分母都会排除这些取消请求。playurl 日志中的 `quality_params=upgraded|failed|unchanged|not_attempted` 表示最高画质请求参数处理状态，不代表响应最终提供的实际画质。若启用 Caddy access log，应对 `/playurl/`、`/playurl-grpc/` 和 `/proxy/` 路径脱敏，或关闭不必要的访问日志。
 
 ### 上游连接
 
@@ -327,6 +341,20 @@ playurl 整体请求超时为 30 秒，WBI key 获取阶段最多使用其中 3 
 HTTP/3 由宿主机 Caddy 在浏览器到 Caddy 的公网连接上提供。需要确保 UDP 443 可达。Caddy 到 Go 服务仍通过回环 HTTP 连接，因此启用 HTTP/3 不代表端到端 QUIC，也不保证提高 VPS 的持续媒体吞吐。
 
 ## 运行时诊断
+
+### 实时诊断页
+
+诊断页与代理共用主监听端口，通过公开服务地址访问：
+
+```text
+https://bili.example.com/diagnostics/
+```
+
+页面和 `/diagnostics/api/snapshot` 每 2 秒读取内存快照，展示活动媒体流、最近吞吐、1/5/15 分钟成功率与状态分布、CDN 主机错误率和 403、gRPC status、上游响应头 p50/p95、客户端取消及最近最多 100 条脱敏错误。指标使用固定的 900 个每秒时间桶保留最近 15 分钟：请求计数与状态不会因请求量超过事件环形缓冲区而低估，字节数按实际传输发生的秒计入窗口，延迟使用固定直方图，单桶主机数量受限并合并到 `other`。所有结构均有固定内存上限，不写入磁盘，进程重启后清零；页面不展示客户端 IP，也不会保存 URL、查询参数、Token 或认证头。
+
+诊断响应设置 `no-store`、CSP、禁止 iframe 和 no-referrer 等安全头，并且不会进入代理请求指标或逐请求日志。该页面没有内置认证；需要限制访问时，可在宿主机 Caddy 中单独匹配 `/diagnostics/*` 配置 Basic Auth，或使用 Cloudflare Access。
+
+### Flight Recorder
 
 Compose 默认设置 `TRACE_DIR=/traces`，因此 Unix 容器会启用 Go Flight Recorder，在内存中保留最多约 8 MiB、至少最近 5 秒的运行时事件。
 
@@ -393,7 +421,9 @@ node --check surge/bili-acc-response.js
 - 点播视频和音频都能正常播放；
 - 拖动进度时媒体响应为 `206 Partial Content`；
 - 直播 playlist、分片和密钥请求都经过 `/proxy/`；
-- `docker compose logs app` 中没有 Cookie、Token 或完整查询参数。
+- `docker compose logs app` 中成功媒体请求不会逐条刷屏，失败会立即输出且重复错误会汇总；
+- `https://你的域名/diagnostics/` 能显示滚动指标和脱敏错误；
+- 日志和诊断快照中没有 Cookie、Authorization、Token、完整 URL 或查询参数。
 
 ## 许可证
 
