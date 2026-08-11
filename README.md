@@ -40,6 +40,10 @@ const TOKEN = "与 .env 相同的 TOKEN";
 
 安装到 Tampermonkey 并授权 `GM_cookie`。Cookie 仅随 playurl 请求转发，不会由应用写入日志或磁盘。
 
+## Surge
+
+Surge iOS 5.9+ / Mac 5.5+ 可安装 `https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc.sgmodule`，填写 `server` 和 `token`，并启用 MITM、信任其 CA。模块仅 MITM B 站 playurl API，媒体响应仍由服务端流式转发。
+
 ## 配置
 
 | 环境变量 | 默认值 | 用途 |
@@ -56,8 +60,10 @@ const TOKEN = "与 .env 相同的 TOKEN";
 ```bash
 go test ./...
 go vet ./...
-node --test userscript/bili-cf-acc.test.cjs
+node --test userscript/bili-cf-acc.test.cjs surge/bili-acc.test.cjs
 node --check userscript/bili-cf-acc.user.js
+node --check surge/bili-acc-request.js
+node --check surge/bili-acc-response.js
 ```
 
 浏览器 Network 中应看到 `/playurl/`、`/proxy/` 请求；拖动播放进度时媒体响应应为 206。
