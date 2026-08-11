@@ -23,6 +23,12 @@ func main() {
 		listen = ":8080"
 	}
 
+	stopFlightRecorder, err := startFlightRecorder(os.Getenv("TRACE_DIR"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stopFlightRecorder()
+
 	httpServer := &http.Server{
 		Addr:              listen,
 		Handler:           proxy.New(token, os.Getenv("PUBLIC_URL"), os.Getenv("ALLOWED_HOSTS")),

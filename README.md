@@ -4,7 +4,7 @@
 
 ## 部署
 
-要求：Linux VPS、Docker Compose、宿主机 Caddy，以及指向 VPS 的域名。
+要求：Linux VPS、Docker Compose、宿主机 Caddy，以及指向 VPS 的域名。本地开发和检查使用 Go 1.26；运行 `go test -race` 还需要 GCC 或 Clang。
 
 ```bash
 cp .env.example .env
@@ -52,13 +52,30 @@ Surge iOS 5.9+ / Mac 5.5+ 可安装 `https://raw.githubusercontent.com/JohnsonRa
 | `LISTEN_ADDR` | `:8080` | HTTP 监听地址 |
 | `PUBLIC_URL` | 从请求推断 | HLS 改写使用的公开地址 |
 | `ALLOWED_HOSTS` | B 站媒体域名 | 媒体域名后缀白名单 |
+| `TRACE_DIR` | 空（Compose 使用 `/traces`） | 启用运行时 Flight Recorder，并将诊断 trace 写入该目录 |
 
 服务默认强制上游使用 IPv4，并忽略 `HTTP_PROXY`、`HTTPS_PROXY`，确保 playurl 与媒体请求使用同一出口。
+
+## 运行时诊断
+
+Compose 默认启用 Go Flight Recorder，在内存中保留最多约 8 MiB 的近期运行时事件。遇到偶发卡顿、锁等待或调度异常时，可发送 `SIGUSR1` 保存快照：
+
+```bash
+docker compose kill -s SIGUSR1 app
+docker compose logs --tail=20 app
+docker compose cp app:/traces/. ./traces/
+TRACE_FILE=$(find ./traces -type f -name 'runtime-*.trace' | sort | tail -n 1)
+go tool trace "$TRACE_FILE"
+```
+
+trace 保存在 Docker 命名卷中，不会随容器重建丢失。不需要该能力时，可在 `compose.yaml` 中移除 `TRACE_DIR` 和 `traces` volume。
 
 ## 检查
 
 ```bash
 go test ./...
+go test -race ./...
+go test ./internal/proxy -run '^$' -bench . -benchmem
 go vet ./...
 node --test userscript/bili-cf-acc.test.cjs surge/bili-acc.test.cjs
 node --check userscript/bili-cf-acc.user.js

@@ -7,5 +7,11 @@ services:
       TOKEN: ${TOKEN}
       PUBLIC_URL: https://${DOMAIN}
       ALLOWED_HOSTS: bilivideo.com,bilivideo.cn,biliapi.net,akamaized.net
+      TRACE_DIR: /traces
     ports:
       - "127.0.0.1:8080:8080"
+    volumes:
+      - traces:/traces
+
+volumes:
+  traces:

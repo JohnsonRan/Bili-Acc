@@ -120,7 +120,7 @@ test("scripts pass through when module arguments are incomplete", () => {
 
 test("module declares parameterized scripts and MITM hosts", () => {
   const moduleText = fs.readFileSync(path.join(__dirname, "bili-acc.sgmodule"), "utf8");
-  assert.match(moduleText, /^#!arguments=server:https:\/\/bili\.example\.com,token:$/m);
+  assert.match(moduleText, /^#!arguments=server:https:\/\/bili\.example\.com,token:12345$/m);
   assert.match(moduleText, /type=http-request/);
   assert.match(moduleText, /type=http-response/);
   const scriptLines = moduleText.split(/\r?\n/).filter((item) => item.includes("type=http-"));

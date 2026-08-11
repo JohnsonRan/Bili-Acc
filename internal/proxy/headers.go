@@ -58,7 +58,7 @@ func copyResponseHeaders(destination, source http.Header) {
 		"transfer-encoding": true, "upgrade": true,
 	}
 	for _, value := range source.Values("Connection") {
-		for _, name := range strings.Split(value, ",") {
+		for name := range strings.SplitSeq(value, ",") {
 			hopHeaders[strings.ToLower(strings.TrimSpace(name))] = true
 		}
 	}

@@ -11,8 +11,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -178,39 +180,43 @@ func TestWBIRefreshFailureFallsBackToOriginalRequest(t *testing.T) {
 }
 
 func TestWBIRefreshIsSharedAcrossConcurrentRequests(t *testing.T) {
-	var navRequests atomic.Int32
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
-	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		navRequests.Add(1)
-		started <- struct{}{}
-		<-release
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png","sub_url":"https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"}}}`)),
-			Request:    request,
-		}, nil
-	})
-	results := make(chan error, 2)
-	for range 2 {
-		go func() {
-			_, err := app.getWBIKey(context.Background(), nil)
-			results <- err
-		}()
-	}
-	<-started
-	time.Sleep(10 * time.Millisecond)
-	close(release)
-	for range 2 {
-		if err := <-results; err != nil {
-			t.Fatal(err)
+	synctest.Test(t, func(t *testing.T) {
+		var navRequests atomic.Int32
+		release := make(chan struct{})
+		app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+		app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			navRequests.Add(1)
+			<-release
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png","sub_url":"https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"}}}`)),
+				Request:    request,
+			}, nil
+		})
+
+		results := make(chan error, 2)
+		var requests sync.WaitGroup
+		for range 2 {
+			requests.Go(func() {
+				_, err := app.getWBIKey(context.Background(), nil)
+				results <- err
+			})
 		}
-	}
-	if got := navRequests.Load(); got != 1 {
-		t.Fatalf("nav requests = %d", got)
-	}
+
+		synctest.Wait()
+		if got := navRequests.Load(); got != 1 {
+			t.Fatalf("nav requests before release = %d", got)
+		}
+		close(release)
+		requests.Wait()
+		close(results)
+		for err := range results {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
 }
 
 func TestWBIRejectsMalformedKeys(t *testing.T) {

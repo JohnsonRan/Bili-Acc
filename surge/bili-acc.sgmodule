@@ -1,6 +1,6 @@
 #!name=Bili Acc
 #!desc=Route Bilibili web playurl and media URLs through a fixed-egress Bili-Acc server.
-#!arguments=server:https://bili.example.com,token:
+#!arguments=server:https://bili.example.com,token:12345
 #!arguments-desc=Set the public HTTPS server origin and matching token. Requires Surge iOS 5.9+ or Mac 5.5+, with MITM enabled and its CA trusted.
 
 [Script]
