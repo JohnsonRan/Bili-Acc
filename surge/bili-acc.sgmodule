@@ -4,8 +4,9 @@
 #!arguments-desc=Set the public HTTPS server origin and matching token. Requires Surge iOS 5.9+ or Mac 5.5+, with MITM enabled and its CA trusted.
 
 [Script]
-bili-acc-request = type=http-request,pattern=^https://api(?:\.live)?\.bilibili\.com/(?:x/player/(?:wbi/)?playurl|pgc/player/web(?:/v2)?/playurl|xlive/web-room/v2/index/getRoomPlayInfo|room/v1/Room/playUrl)(?:\?|$),script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-request.js,argument="{{{server}}}|{{{token}}}",timeout=5
-bili-acc-response = type=http-response,pattern=^https://(?:api(?:\.live)?\.bilibili\.com/(?:x/player/(?:wbi/)?playurl|pgc/player/web(?:/v2)?/playurl|xlive/web-room/v2/index/getRoomPlayInfo|room/v1/Room/playUrl)(?:\?|$)|[^/]+/playurl/[^/]+/),script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-response.js,argument="{{{server}}}|{{{token}}}",requires-body=true,max-size=2097152,timeout=5
+bili-acc-request = type=http-request,pattern=^https://api(?:\.live)?\.bilibili\.com/(?:x/player/(?:wbi/)?playurl|pgc/player/web(?:/v2)?/playurl|xlive/web-room/v2/index/getRoomPlayInfo|room/v1/Room/playUrl)(?:\?|$),script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-request.js,argument="{{{server}}}|{{{token}}}",timeout=5,debug=true
+bili-acc-media-request = type=http-request,pattern=^https?://(?:[^./?#:]+\.)*(?:bilivideo\.com|bilivideo\.cn|biliapi\.net)(?::\d+)?(?:/|$),script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-media-request.js,argument="{{{server}}}|{{{token}}}",timeout=5,debug=true
+bili-acc-response = type=http-response,pattern=^https://(?:api(?:\.live)?\.bilibili\.com/(?:x/player/(?:wbi/)?playurl|pgc/player/web(?:/v2)?/playurl|xlive/web-room/v2/index/getRoomPlayInfo|room/v1/Room/playUrl)(?:\?|$)|[^/]+/playurl/[^/]+/),script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-response.js,argument="{{{server}}}|{{{token}}}",requires-body=true,max-size=2097152,timeout=5,debug=true
 
 [MITM]
-hostname = %APPEND% api.bilibili.com, api.live.bilibili.com
+hostname = %APPEND% api.bilibili.com, api.live.bilibili.com, bilivideo.com, *.bilivideo.com, bilivideo.cn, *.bilivideo.cn, biliapi.net, *.biliapi.net

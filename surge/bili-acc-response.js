@@ -8,14 +8,27 @@
   const server = configuredServer.replace(/\/$/, "");
   const MEDIA_HOSTS = ["bilivideo.com", "bilivideo.cn", "biliapi.net", "akamaized.net"];
   const URL_KEYS = new Set(["baseUrl", "base_url", "backupUrl", "backup_url", "url", "playurl"]);
-  if (!/^https:\/\/[^/]+$/i.test(server) || !token || !$response.body) {
+  if (!/^https:\/\/[^/]+$/i.test(server)) {
+    log("skip reason=invalid_server");
+    $done({});
+    return;
+  }
+  if (!token) {
+    log("skip reason=missing_token");
+    $done({});
+    return;
+  }
+  if (!$response.body) {
+    log(`skip reason=empty_body status=${String($response.status || "unknown")}`);
     $done({});
     return;
   }
   const requestURL = String($request.url || "");
   const originalAPI = /^https:\/\/api(?:\.live)?\.bilibili\.com\/(?:x\/player\/(?:wbi\/)?playurl|pgc\/player\/web(?:\/v2)?\/playurl|xlive\/web-room\/v2\/index\/getRoomPlayInfo|room\/v1\/Room\/playUrl)(?:\?|$)/i;
   const proxiedPrefix = `${server}/playurl/${encodeURIComponent(token)}/`;
-  if (!originalAPI.test(requestURL) && !requestURL.startsWith(proxiedPrefix)) {
+  const requestKind = originalAPI.test(requestURL) ? "original_api" : requestURL.startsWith(proxiedPrefix) ? "proxied_api" : "unrelated";
+  if (requestKind === "unrelated") {
+    log("skip reason=unrelated_request");
     $done({});
     return;
   }
@@ -23,27 +36,44 @@
   let payload;
   try {
     payload = JSON.parse($response.body);
-  } catch (_) {
+  } catch (error) {
+    log(`skip reason=invalid_json status=${String($response.status || "unknown")} source=${requestKind} error=${errorName(error)}`);
     $done({});
     return;
   }
 
+  let rewrittenURLs = 0;
   rewrite(payload);
   const headers = {...$response.headers};
   for (const name of ["content-length", "content-encoding", "content-md5", "digest", "etag", "last-modified"]) {
     deleteHeader(headers, name);
   }
+  log(`rewrite status=${String($response.status || "unknown")} source=${requestKind} media_urls=${rewrittenURLs}`);
   $done({body: JSON.stringify(payload), headers});
+
+  function log(message) {
+    console.log(`[Bili Acc][response] ${message}`);
+  }
+
+  function errorName(error) {
+    return error && error.name ? String(error.name) : "Error";
+  }
 
   function rewrite(value) {
     if (!value || typeof value !== "object") return;
     for (const [key, child] of Object.entries(value)) {
       if (URL_KEYS.has(key) && typeof child === "string" && isMediaURL(child)) {
         value[key] = proxyURL(child);
+        rewrittenURLs++;
       } else if (URL_KEYS.has(key) && Array.isArray(child)) {
-        value[key] = child.map((item) => typeof item === "string" && isMediaURL(item) ? proxyURL(item) : item);
+        value[key] = child.map((item) => {
+          if (typeof item !== "string" || !isMediaURL(item)) return item;
+          rewrittenURLs++;
+          return proxyURL(item);
+        });
       } else if (key === "host" && typeof child === "string" && isMediaURL(child)) {
         value[key] = proxyURL(child, true);
+        rewrittenURLs++;
       } else {
         rewrite(child);
       }

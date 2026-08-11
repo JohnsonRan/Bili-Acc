@@ -7,6 +7,8 @@
   const token = separator >= 0 ? argument.slice(separator + 1) : "";
   const server = configuredServer.replace(/\/$/, "");
   const method = String($request.method || "").toUpperCase();
+  const MEDIA_HOSTS = ["bilivideo.com", "bilivideo.cn", "biliapi.net", "akamaized.net"];
+
   if (!/^https:\/\/[^/]+$/i.test(server)) {
     log("skip reason=invalid_server");
     $done({});
@@ -17,7 +19,7 @@
     $done({});
     return;
   }
-  if (method !== "GET") {
+  if (method !== "GET" && method !== "HEAD") {
     log(`skip reason=unsupported_method method=${method || "unknown"}`);
     $done({});
     return;
@@ -32,32 +34,32 @@
     return;
   }
 
-  const headers = {...$request.headers};
-  const cookie = getHeader(headers, "cookie");
-  const referer = getHeader(headers, "referer") || "https://www.bilibili.com/";
+  const origin = match[1];
+  const mediaHost = hostOf(origin);
+  if (!MEDIA_HOSTS.some((suffix) => mediaHost === suffix || mediaHost.endsWith(`.${suffix}`))) {
+    log(`skip reason=unsupported_media_host media_host=${mediaHost}`);
+    $done({});
+    return;
+  }
+
+  const headers = {...($request.headers || {})};
+  const hasRange = getHeader(headers, "range") !== "";
   deleteHeader(headers, "cookie");
   deleteHeader(headers, "host");
   headers.Host = serverMatch[1];
-  headers["X-Bili-Cookie"] = cookie;
-  headers["X-Bili-Referer"] = referer;
 
-  const origin = match[1];
   const path = match[2] || "/";
-  const url = `${server}/playurl/${encodeURIComponent(token)}/${base64url(origin)}${path}`;
-  log(`rewrite api_host=${hostOf(origin)} api_path=${safePath(path)} cookie_present=${cookie !== ""}`);
+  const url = `${server}/proxy/${encodeURIComponent(token)}/${base64url(origin)}${path}`;
+  log(`rewrite media_host=${mediaHost} method=${method} range=${hasRange}`);
   $done({url, headers});
 
   function log(message) {
-    console.log(`[Bili Acc][request] ${message}`);
+    console.log(`[Bili Acc][media-request] ${message}`);
   }
 
   function hostOf(origin) {
     const match = String(origin).match(/^https?:\/\/([^/:?#]+)/i);
     return match ? match[1].toLowerCase() : "unknown";
-  }
-
-  function safePath(path) {
-    return String(path).split(/[?#]/, 1)[0] || "/";
   }
 
   function getHeader(headers, name) {

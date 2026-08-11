@@ -250,7 +250,7 @@ const TOKEN = "replace-with-the-same-token-as-the-server";
 
 ### Surge
 
-Surge iOS 5.9+ 或 Surge Mac 5.5+ 可以安装：
+Surge iOS 5.9+ 或 Surge Mac 5.5+ 可以直接安装参数化模块：
 
 ```text
 https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc.sgmodule
@@ -265,9 +265,21 @@ Surge 还需要：
 
 - 启用 MITM；
 - 安装并信任 Surge CA；
-- 允许模块 MITM `api.bilibili.com` 和 `api.live.bilibili.com`。
+- 允许模块 MITM playurl API 和媒体 CDN 域名。
 
-模块只对 playurl API 做 MITM。媒体响应不经过 Surge 响应脚本解析，而是由 Bili-Acc 服务端直接流式转发。
+网页端请求仍通过 playurl API 响应改写。原生 App 不需要解析其 playurl/protobuf 响应：模块会在 App 请求 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体地址时，直接将请求改写为 Bili-Acc `/proxy/` 地址，并保留 `Range` 等流式请求头。
+
+`akamaized.net` 是多个服务共用的 CDN 后缀，直接全域 MITM 和改写可能影响非 B 站流量，因此不在主模块中默认启用。只有确认 B 站媒体实际使用该域名时，才额外安装 `surge/bili-acc-akamai.sgmodule`，并填写相同的 `server` 和 `token`。
+
+若模块没有生效，在 Surge 的脚本日志或请求备注中搜索 `[Bili Acc]`；模块已启用 `debug=true`，因此命中脚本的 `console.log()` 会同时写入请求备注。一次正常的点播请求至少应看到：
+
+```text
+[Bili Acc][request] rewrite api_host=api.bilibili.com api_path=/x/player/wbi/playurl cookie_present=true
+[Bili Acc][response] rewrite status=200 source=proxied_api media_urls=4
+[Bili Acc][media-request] rewrite media_host=upos.example.bilivideo.com method=GET range=true
+```
+
+网页端的 `media_urls` 会随响应内容变化；为 `0` 表示响应脚本执行了，但没有找到受支持的媒体 URL。原生 App 至少应出现 `[media-request] rewrite`。`skip reason=...` 会说明参数无效、请求方法不支持、响应体为空或 JSON 无法解析等原因。日志只记录 API/媒体主机、无查询参数的 API 路径、状态和计数，不记录 server、Token、Cookie、完整媒体 URL 或查询参数。如果完全没有 `[Bili Acc]` 日志，说明请求脚本没有运行；优先检查模块和 MITM 是否启用、Surge CA 是否已信任、实际请求是否命中模块声明的域名，以及是否有其他模块中更靠前的 `http-request` 脚本先匹配了该请求（Surge 对每个请求只运行首个匹配脚本）。
 
 ## 安全与运行行为
 
@@ -362,8 +374,9 @@ node --check surge/bili-acc-response.js
 
 浏览器或 Surge 中至少检查：
 
-- playurl 请求改写为 `https://你的域名/playurl/...`；
-- 视频和音频 URL 改写为 `https://你的域名/proxy/...`；
+- 网页 playurl 请求改写为 `https://你的域名/playurl/...`；
+- 网页响应中的视频和音频 URL 改写为 `https://你的域名/proxy/...`；
+- 原生 App 的媒体 CDN 请求直接改写为 `https://你的域名/proxy/...`；
 - 点播视频和音频都能正常播放；
 - 拖动进度时媒体响应为 `206 Partial Content`；
 - 直播 playlist、分片和密钥请求都经过 `/proxy/`；
