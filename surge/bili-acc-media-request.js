@@ -7,7 +7,7 @@
   const token = separator >= 0 ? argument.slice(separator + 1) : "";
   const server = configuredServer.replace(/\/$/, "");
   const method = String($request.method || "").toUpperCase();
-  const MEDIA_HOSTS = ["bilivideo.com", "bilivideo.cn", "biliapi.net", "akamaized.net"];
+  const MEDIA_HOSTS = ["bilivideo.com", "bilivideo.cn", "biliapi.net"];
 
   if (!/^https:\/\/[^/]+$/i.test(server)) {
     log("skip reason=invalid_server");

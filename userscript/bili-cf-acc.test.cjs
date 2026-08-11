@@ -22,6 +22,9 @@ function loadScript() {
     get response() {
       return this._response;
     }
+    get responseText() {
+      return this._responseText;
+    }
   }
 
   class RootRequest extends Request {
@@ -95,10 +98,11 @@ function loadScript() {
 test("routes playurl fetch through server with login cookie", async () => {
   const { root, fetchCalls } = loadScript();
   const response = await root.fetch("https://api.bilibili.com/x/player/playurl?bvid=BV1&cid=1");
-  assert.match(fetchCalls[0].input.url, /^https:\/\/bili\.example\.com\/playurl\//);
+  assert.match(fetchCalls[0].input.url, /^https:\/\/bili\.example\.com\/playurl\/replace-with-the-same-token-as-the-server\//);
   assert.equal(fetchCalls[0].input.headers.get("X-Bili-Cookie"), "SESSDATA=secret");
   const parsed = await response.json();
   assert.match(parsed.data.url, /^https:\/\/bili\.example\.com\/proxy\//);
+  assert.match(parsed.data.url, /replace-with-the-same-token-as-the-server/);
 });
 
 test("preserves Request options and leaves unrelated fetch responses alone", async () => {
@@ -145,9 +149,34 @@ test("routes playurl XHR and rewrites media URLs", async () => {
   xhr.open("GET", "https://api.bilibili.com/x/player/wbi/playurl?bvid=BV1&cid=1");
   xhr.send();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.match(xhr.opened.url, /^https:\/\/bili\.example\.com\/playurl\//);
+  assert.match(xhr.opened.url, /^https:\/\/bili\.example\.com\/playurl\/replace-with-the-same-token-as-the-server\//);
   assert.equal(xhr.headers.get("X-Bili-Cookie"), "SESSDATA=secret");
 
   const parsed = root.JSON.parse('{"data":{"dash":{"video":[{"baseUrl":"https://cdn.bilivideo.com/a.m4s"}]}}}');
   assert.match(parsed.data.dash.video[0].baseUrl, /^https:\/\/bili\.example\.com\/proxy\//);
+});
+
+test("rewrites initial page playinfo before the first quality switch", () => {
+  const { root } = loadScript();
+  root.__playinfo__ = {
+    data: {dash: {video: [{baseUrl: "https://cdn.bilivideo.com/initial.m4s"}]}},
+  };
+  assert.match(root.__playinfo__.data.dash.video[0].baseUrl, /^https:\/\/bili\.example\.com\/proxy\//);
+
+  root.__NEPTUNE_IS_MY_WAIFU__ = {
+    roomInfoRes: {data: {playurl: "https://live.bilivideo.com/live/index.m3u8"}},
+  };
+  assert.match(root.__NEPTUNE_IS_MY_WAIFU__.roomInfoRes.data.playurl, /^https:\/\/bili\.example\.com\/proxy\//);
+});
+
+test("rewrites proxied fetch text and XHR responseText consumers", async () => {
+  const { root, FakeXHR } = loadScript();
+  const response = await root.fetch("https://api.bilibili.com/x/player/playurl?cid=1");
+  const text = await response.text();
+  assert.match(text, /https:\/\/bili\.example\.com\/proxy\//);
+
+  const xhr = new FakeXHR();
+  xhr.open("GET", "https://api.bilibili.com/x/player/playurl?cid=1");
+  xhr._responseText = '{"data":{"url":"https://cdn.bilivideo.com/initial.m4s"}}';
+  assert.match(xhr.responseText, /https:\/\/bili\.example\.com\/proxy\//);
 });

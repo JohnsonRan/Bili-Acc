@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bili CF Acc
 // @namespace    bili-cf-acc
-// @version      0.2.0
+// @version      0.3.0
 // @description  Route Bilibili playurl APIs and media through your fixed-egress proxy.
 // @match        https://www.bilibili.com/*
 // @match        https://live.bilibili.com/*
@@ -74,6 +74,32 @@
     };
     return visit(value);
   };
+
+  const nativeParse = root.JSON.parse;
+  const rewriteJSONText = (value) => {
+    if (typeof value !== "string" || !MEDIA_URL_HINT.test(value)) return value;
+    try {
+      return root.JSON.stringify(rewrite(nativeParse(value)));
+    } catch {
+      return value;
+    }
+  };
+
+  for (const name of ["__playinfo__", "__NEPTUNE_IS_MY_WAIFU__"]) {
+    const descriptor = Object.getOwnPropertyDescriptor(root, name);
+    if (descriptor && !descriptor.configurable) continue;
+    let value = descriptor && "value" in descriptor ? rewrite(descriptor.value) : undefined;
+    Object.defineProperty(root, name, {
+      configurable: true,
+      enumerable: descriptor?.enumerable ?? true,
+      get() {
+        return value;
+      },
+      set(next) {
+        value = rewrite(next);
+      },
+    });
+  }
 
   const readCookies = () => new Promise((resolve) => {
     if (typeof GM_cookie === "undefined") {
@@ -149,7 +175,6 @@
     });
   };
 
-  const nativeParse = root.JSON.parse;
   root.JSON.parse = function (...args) {
     const parsed = nativeParse.apply(this, args);
     return typeof args[0] === "string" && MEDIA_URL_HINT.test(args[0]) ? rewrite(parsed) : parsed;
@@ -162,6 +187,13 @@
       return proxiedFetchResponses.has(this) ? rewrite(parsed) : parsed;
     };
   }
+  const nativeText = root.Response?.prototype.text;
+  if (nativeText) {
+    root.Response.prototype.text = async function (...args) {
+      const text = await nativeText.apply(this, args);
+      return proxiedFetchResponses.has(this) ? rewriteJSONText(text) : text;
+    };
+  }
 
   const responseDescriptor = Object.getOwnPropertyDescriptor(root.XMLHttpRequest.prototype, "response");
   if (responseDescriptor?.get && responseDescriptor.configurable) {
@@ -169,7 +201,19 @@
       ...responseDescriptor,
       get() {
         const response = responseDescriptor.get.call(this);
-        return this[xhrPlayurl] ? rewrite(response) : response;
+        if (!this[xhrPlayurl]) return response;
+        return typeof response === "string" ? rewriteJSONText(response) : rewrite(response);
+      },
+    });
+  }
+
+  const responseTextDescriptor = Object.getOwnPropertyDescriptor(root.XMLHttpRequest.prototype, "responseText");
+  if (responseTextDescriptor?.get && responseTextDescriptor.configurable) {
+    Object.defineProperty(root.XMLHttpRequest.prototype, "responseText", {
+      ...responseTextDescriptor,
+      get() {
+        const responseText = responseTextDescriptor.get.call(this);
+        return this[xhrPlayurl] ? rewriteJSONText(responseText) : responseText;
       },
     });
   }

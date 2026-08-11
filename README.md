@@ -230,7 +230,7 @@ bilivideo.com,bilivideo.cn,biliapi.net,akamaized.net
 
 ## 客户端
 
-### Tampermonkey 用户脚本
+### Tampermonkey / Violentmonkey 用户脚本
 
 编辑 `userscript/bili-cf-acc.user.js`：
 
@@ -241,12 +241,12 @@ const TOKEN = "replace-with-the-same-token-as-the-server";
 
 随后：
 
-1. 在 Tampermonkey 中新建脚本并粘贴文件内容，或从本地文件导入。
+1. 在 Tampermonkey 或 Violentmonkey 中新建脚本并粘贴文件内容，或从本地文件导入。
 2. 确认脚本在 `www.bilibili.com` 和 `live.bilibili.com` 上启用。
 3. 授权 `GM_cookie`，以读取包括 HttpOnly 在内的 B 站登录 Cookie。
 4. 刷新 B 站页面并开始播放。
 
-脚本会拦截网页端 GET playurl 请求，将 Cookie 放入 `X-Bili-Cookie`，然后把 playurl 响应中的视频、音频和直播媒体 URL 改写为 `/proxy/` 地址。Cookie 在脚本内缓存 15 秒，不会由服务端持久化。
+脚本会在 `document-start` 阶段拦截网页端 GET playurl 请求，将 Cookie 放入 `X-Bili-Cookie`，并改写 fetch JSON/text、XHR response/responseText 以及页面初始 `__playinfo__`/直播状态中的媒体 URL，避免首次打开后必须切换清晰度才生效。Cookie 在脚本内缓存 15 秒，不会由服务端持久化。
 
 ### Surge
 
@@ -267,19 +267,21 @@ Surge 还需要：
 - 安装并信任 Surge CA；
 - 允许模块 MITM playurl API 和媒体 CDN 域名。
 
-网页端请求仍通过 playurl API 响应改写。原生 App 不需要解析其 playurl/protobuf 响应：模块会在 App 请求 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体地址时，直接将请求改写为 Bili-Acc `/proxy/` 地址，并保留 `Range` 等流式请求头。
+网页端请求仍通过 playurl API 响应改写。原生 App 的 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求会直接改写为 Bili-Acc `/proxy/` 地址，并保留 `Range` 等流式请求头。
 
-`akamaized.net` 是多个服务共用的 CDN 后缀，直接全域 MITM 和改写可能影响非 B 站流量，因此不在主模块中默认启用。只有确认 B 站媒体实际使用该域名时，才额外安装 `surge/bili-acc-akamai.sgmodule`，并填写相同的 `server` 和 `token`。
+为避免对共享 CDN `*.akamaized.net` 做全域 MITM，模块参考 BiliUniverse/Redirect 的策略，只 MITM `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的 `Player/PlayViewUnite` 原生播放请求与响应。请求脚本声明 `grpc-accept-encoding: identity`，响应脚本按已知 protobuf 字段结构处理 `DashVideo`/`ResponseUrl`，发现 Akamai 主地址时仅替换为同一媒体项自带的 `bilivideo.com`/`bilivideo.cn`/`biliapi.net` 备用地址，并原样保留未知字段。主模块完全不声明 `akamaized.net` MITM；如果上游仍返回压缩 frame 或没有 B 站备用地址，脚本会明确记录并保持原样。
 
 若模块没有生效，在 Surge 的脚本日志或请求备注中搜索 `[Bili Acc]`；模块已启用 `debug=true`，因此命中脚本的 `console.log()` 会同时写入请求备注。一次正常的点播请求至少应看到：
 
 ```text
 [Bili Acc][request] rewrite api_host=api.bilibili.com api_path=/x/player/wbi/playurl cookie_present=true
 [Bili Acc][response] rewrite status=200 source=proxied_api media_urls=4
+[Bili Acc][grpc-request] compression=identity
+[Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 akamai_urls=1
 [Bili Acc][media-request] rewrite media_host=upos.example.bilivideo.com method=GET range=true
 ```
 
-网页端的 `media_urls` 会随响应内容变化；为 `0` 表示响应脚本执行了，但没有找到受支持的媒体 URL。原生 App 至少应出现 `[media-request] rewrite`。`skip reason=...` 会说明参数无效、请求方法不支持、响应体为空或 JSON 无法解析等原因。日志只记录 API/媒体主机、无查询参数的 API 路径、状态和计数，不记录 server、Token、Cookie、完整媒体 URL 或查询参数。如果完全没有 `[Bili Acc]` 日志，说明请求脚本没有运行；优先检查模块和 MITM 是否启用、Surge CA 是否已信任、实际请求是否命中模块声明的域名，以及是否有其他模块中更靠前的 `http-request` 脚本先匹配了该请求（Surge 对每个请求只运行首个匹配脚本）。
+网页端的 `media_urls` 会随响应内容变化；为 `0` 表示响应脚本执行了，但没有找到受支持的媒体 URL。原生 App 通常会出现 `[grpc-response]` 和/或 `[media-request] rewrite`；`akamai_urls=0` 表示响应内没有可用的 Akamai→B 站备用地址替换。`skip reason=...` 会说明参数无效、请求方法不支持、响应体为空、压缩/无效 protobuf 或 JSON 无法解析等原因。日志只记录 API/媒体主机、无查询参数的 API 路径、状态和计数，不记录 server、Token、Cookie、完整媒体 URL 或查询参数。如果完全没有 `[Bili Acc]` 日志，说明请求脚本没有运行；优先检查模块和 MITM 是否启用、Surge CA 是否已信任、实际请求是否命中模块声明的域名，以及是否有其他模块中更靠前的同类型脚本先匹配了该请求（Surge 对每个请求只运行首个匹配脚本）。
 
 ## 安全与运行行为
 
