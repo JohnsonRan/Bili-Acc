@@ -95,12 +95,17 @@ func TestPlayurlRequestsHighestQualityWithoutChangingResponseMetadata(t *testing
 
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
 	app.client.Transport = transportTo(upstream)
+	var logs bytes.Buffer
+	app.logger = log.New(&logs, "", 0)
 	target := "https://api.bilibili.com/x/player/playurl?bvid=BV1&cid=1&qn=80"
 	request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, target), nil)
 	response := httptest.NewRecorder()
 	app.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != upstreamBody {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	if got := logs.String(); !strings.Contains(got, "route=playurl") || !strings.Contains(got, "quality_params=upgraded") || strings.Contains(got, "range=") || strings.Contains(got, "highest_quality=") {
+		t.Fatalf("playurl log = %q", got)
 	}
 }
 
@@ -149,6 +154,8 @@ func TestWBIPlayurlQualityUpgradeRefreshesAndCachesSignature(t *testing.T) {
 
 func TestWBIRefreshFailureFallsBackToOriginalRequest(t *testing.T) {
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	var logs bytes.Buffer
+	app.logger = log.New(&logs, "", 0)
 	app.wbiFetchTimeout = 20 * time.Millisecond
 	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
@@ -176,6 +183,9 @@ func TestWBIRefreshFailureFallsBackToOriginalRequest(t *testing.T) {
 	app.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != `{"code":0}` {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	if got := logs.String(); !strings.Contains(got, "quality_upgrade_failed") || !strings.Contains(got, "quality_params=failed") {
+		t.Fatalf("failed quality log = %q", got)
 	}
 }
 
@@ -365,9 +375,14 @@ func TestRequestLogIsUsefulAndRedactsSecrets(t *testing.T) {
 	app.ServeHTTP(response, request)
 
 	logged := output.String()
-	for _, expected := range []string{"route=media", `target_host="cdn.bilivideo.com"`, "status=206", "upstream_status=206", "bytes=1", "range=true"} {
+	for _, expected := range []string{"route=media", `target_host="cdn.bilivideo.com"`, "status=206", "upstream_status=206", "bytes=1", "range=true", "stream_error=false"} {
 		if !strings.Contains(logged, expected) {
 			t.Fatalf("log missing %q: %q", expected, logged)
+		}
+	}
+	for _, irrelevant := range []string{"quality_params=", "highest_quality="} {
+		if strings.Contains(logged, irrelevant) {
+			t.Fatalf("media log contains %q: %q", irrelevant, logged)
 		}
 	}
 	for _, secret := range []string{testToken, "query-value", "cookie-value"} {

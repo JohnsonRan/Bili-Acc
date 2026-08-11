@@ -292,7 +292,7 @@ Token 位于代理 URL 路径中，因此以下位置可能看到完整请求路
 - 浏览器 Network 面板；
 - 客户端代理软件记录。
 
-应用自身只记录路由分类和目标主机，不记录完整 URL、查询参数、Token 或 Cookie。若启用 Caddy access log，应对 `/playurl/` 和 `/proxy/` 路径进行脱敏，或关闭不必要的访问日志。
+应用自身只记录路由分类和目标主机，不记录完整 URL、查询参数、Token 或 Cookie。媒体请求额外记录 `range` 和 `stream_error`；playurl 请求记录 `quality_params=upgraded|failed|unchanged|not_attempted`，表示最高画质请求参数的处理状态，不代表响应最终提供的实际画质。若启用 Caddy access log，应对 `/playurl/` 和 `/proxy/` 路径进行脱敏，或关闭不必要的访问日志。
 
 ### 上游连接
 

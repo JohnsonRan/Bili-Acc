@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -43,7 +44,7 @@ type requestLog struct {
 	targetHost     string
 	upstreamStatus int
 	streamError    bool
-	highestQuality bool
+	qualityParams  string
 }
 
 type loggingResponseWriter struct {
@@ -121,9 +122,19 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		s.logger.Printf("request method=%s route=%s target_host=%q status=%d upstream_status=%d bytes=%d duration_ms=%d range=%t stream_error=%t highest_quality=%t remote=%q",
-			r.Method, meta.route, meta.targetHost, status, meta.upstreamStatus, loggedWriter.bytes,
-			time.Since(started).Milliseconds(), r.Header.Get("Range") != "", meta.streamError, meta.highestQuality, clientIP(r))
+		message := fmt.Sprintf("request method=%s route=%s target_host=%q status=%d upstream_status=%d bytes=%d duration_ms=%d",
+			r.Method, meta.route, meta.targetHost, status, meta.upstreamStatus, loggedWriter.bytes, time.Since(started).Milliseconds())
+		switch meta.route {
+		case "media":
+			message += fmt.Sprintf(" range=%t stream_error=%t", r.Header.Get("Range") != "", meta.streamError)
+		case "playurl":
+			qualityParams := meta.qualityParams
+			if qualityParams == "" {
+				qualityParams = "not_attempted"
+			}
+			message += " quality_params=" + qualityParams
+		}
+		s.logger.Printf("%s remote=%q", message, clientIP(r))
 	}()
 	w = loggedWriter
 
@@ -250,10 +261,13 @@ func (s *server) handlePlayurl(w http.ResponseWriter, r *http.Request) {
 	upgradedTarget, upgraded, upgradeErr := s.highestQualityTarget(qualityCtx, target, headers)
 	qualityCancel()
 	if upgradeErr != nil {
+		meta.qualityParams = "failed"
 		s.logger.Printf("quality_upgrade_failed target_host=%q", target.Hostname())
 	} else if upgraded {
 		target = upgradedTarget
-		meta.highestQuality = true
+		meta.qualityParams = "upgraded"
+	} else {
+		meta.qualityParams = "unchanged"
 	}
 	response, _, err := s.fetchAllowed(ctx, r.Method, target, headers, allowedPlayurl)
 	if err != nil {
