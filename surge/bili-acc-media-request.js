@@ -20,7 +20,6 @@
     return;
   }
   if (method !== "GET" && method !== "HEAD") {
-    log(`skip reason=unsupported_method method=${method || "unknown"}`);
     $done({});
     return;
   }
@@ -37,7 +36,6 @@
   const origin = match[1];
   const mediaHost = hostOf(origin);
   if (!MEDIA_HOSTS.some((suffix) => mediaHost === suffix || mediaHost.endsWith(`.${suffix}`))) {
-    log(`skip reason=unsupported_media_host media_host=${mediaHost}`);
     $done({});
     return;
   }

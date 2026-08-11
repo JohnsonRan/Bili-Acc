@@ -1,13 +1,13 @@
 #!name=Bili Acc
-#!desc=Route Bilibili web playurl and media URLs through a fixed-egress Bili-Acc server.
+#!desc=Route Bilibili web and native gRPC playurl plus media URLs through a fixed-egress Bili-Acc server.
 #!arguments=server:https://bili.example.com,token:12345
 #!arguments-desc=Set the public HTTPS server origin and matching token. Requires Surge iOS 5.9+ or Mac 5.5+, with MITM enabled and its CA trusted.
 
 [Script]
 bili-acc-request = type=http-request,pattern=^https://api(?:\.live)?\.bilibili\.com/(?:x/player/(?:wbi/)?playurl|pgc/player/web(?:/v2)?/playurl|xlive/web-room/v2/index/getRoomPlayInfo|room/v1/Room/playUrl)(?:\?|$),script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-request.js,argument="{{{server}}}|{{{token}}}",timeout=5,debug=true
+bili-acc-grpc-request = type=http-request,pattern=^https?://(?:grpc\.biliapi\.net|app\.bili(?:bili\.com|api\.net))/bilibili\.app\.playerunite\.v1\.Player/PlayViewUnite$,script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-grpc-request.js,argument="{{{server}}}|{{{token}}}",timeout=5,debug=true
 bili-acc-media-request = type=http-request,pattern=^https?://(?:[^./?#:]+\.)*(?:bilivideo\.com|bilivideo\.cn|biliapi\.net)(?::\d+)?(?:/|$),script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-media-request.js,argument="{{{server}}}|{{{token}}}",timeout=5,debug=true
-bili-acc-grpc-request = type=http-request,pattern=^https?://(?:grpc\.biliapi\.net|app\.bili(?:bili\.com|api\.net))/bilibili\.app\.playerunite\.v1\.Player/PlayViewUnite$,script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-grpc-request.js,timeout=5,debug=true
-bili-acc-grpc-response = type=http-response,pattern=^https?://(?:grpc\.biliapi\.net|app\.bili(?:bili\.com|api\.net))/bilibili\.app\.playerunite\.v1\.Player/PlayViewUnite$,script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-grpc-response.js,requires-body=true,binary-body-mode=true,max-size=8388608,engine=webview,timeout=10,debug=true
+bili-acc-grpc-response = type=http-response,pattern=^(?:https?://(?:grpc\.biliapi\.net|app\.bili(?:bili\.com|api\.net))/bilibili\.app\.playerunite\.v1\.Player/PlayViewUnite|https://[^/]+/playurl-grpc/[^/]+/[^/]+/bilibili\.app\.playerunite\.v1\.Player/PlayViewUnite)$,script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-grpc-response.js,requires-body=true,binary-body-mode=true,max-size=8388608,engine=webview,timeout=10,debug=true
 bili-acc-response = type=http-response,pattern=^https://(?:api(?:\.live)?\.bilibili\.com/(?:x/player/(?:wbi/)?playurl|pgc/player/web(?:/v2)?/playurl|xlive/web-room/v2/index/getRoomPlayInfo|room/v1/Room/playUrl)(?:\?|$)|[^/]+/playurl/[^/]+/),script-path=https://raw.githubusercontent.com/JohnsonRan/Bili-Acc/main/surge/bili-acc-response.js,argument="{{{server}}}|{{{token}}}",requires-body=true,max-size=2097152,timeout=5,debug=true
 
 [MITM]

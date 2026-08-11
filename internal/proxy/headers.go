@@ -15,6 +15,8 @@ func requestRoute(path string) string {
 		return "health"
 	case strings.HasPrefix(path, "/proxy/"):
 		return "media"
+	case strings.HasPrefix(path, "/playurl-grpc/"):
+		return "playurl_grpc"
 	case strings.HasPrefix(path, "/playurl/"):
 		return "playurl"
 	default:
@@ -51,10 +53,41 @@ func copyRequestHeaders(source http.Header, names []string) http.Header {
 	return headers
 }
 
+func copyGRPCRequestHeaders(source http.Header) http.Header {
+	hopHeaders := map[string]bool{
+		"connection": true, "content-length": true, "host": true, "keep-alive": true,
+		"proxy-authenticate": true, "proxy-authorization": true, "proxy-connection": true, "trailer": true,
+		"transfer-encoding": true, "upgrade": true,
+	}
+	for _, value := range source.Values("Connection") {
+		for name := range strings.SplitSeq(value, ",") {
+			hopHeaders[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+	}
+	headers := make(http.Header)
+	for name, values := range source {
+		lower := strings.ToLower(name)
+		proxyMetadata := lower == "forwarded" || lower == "via" || lower == "x-real-ip" || lower == "true-client-ip" || lower == "cdn-loop" || strings.HasPrefix(lower, "x-forwarded-") || strings.HasPrefix(lower, "cf-")
+		if hopHeaders[lower] || proxyMetadata || strings.HasPrefix(lower, "access-control-") || lower == "x-bili-cookie" || lower == "x-bili-referer" {
+			continue
+		}
+		if lower == "te" {
+			if strings.EqualFold(strings.TrimSpace(source.Get(name)), "trailers") {
+				headers.Set("Te", "trailers")
+			}
+			continue
+		}
+		for _, value := range values {
+			headers.Add(name, value)
+		}
+	}
+	return headers
+}
+
 func copyResponseHeaders(destination, source http.Header) {
 	hopHeaders := map[string]bool{
 		"connection": true, "keep-alive": true, "proxy-authenticate": true,
-		"proxy-authorization": true, "te": true, "trailer": true,
+		"proxy-authorization": true, "proxy-connection": true, "te": true, "trailer": true,
 		"transfer-encoding": true, "upgrade": true,
 	}
 	for _, value := range source.Values("Connection") {
@@ -84,8 +117,12 @@ func setCORS(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	}
 	w.Header().Set("Vary", "Origin")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Range, X-Bili-Cookie, X-Bili-Referer")
+	methods := "GET, HEAD, OPTIONS"
+	if strings.HasPrefix(r.URL.Path, "/playurl-grpc/") {
+		methods = "POST, OPTIONS"
+	}
+	w.Header().Set("Access-Control-Allow-Methods", methods)
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range, X-Bili-Cookie, X-Bili-Referer")
 	w.Header().Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, Content-Type")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 }

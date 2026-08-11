@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
@@ -21,7 +22,10 @@ var (
 		regexp.MustCompile(`^/xlive/web-room/v2/index/getRoomPlayInfo$`),
 		regexp.MustCompile(`^/room/v1/Room/playUrl$`),
 	}
+	grpcPlayurlHosts = []string{"grpc.biliapi.net", "app.bilibili.com", "app.biliapi.net"}
 )
+
+const grpcPlayurlPath = "/bilibili.app.playerunite.v1.Player/PlayViewUnite"
 
 const (
 	redirectDrainMax     = 2 << 10
@@ -63,11 +67,19 @@ func (s *server) targetFromRequest(r *http.Request, prefix string) (*url.URL, er
 }
 
 func (s *server) fetchAllowed(ctx context.Context, method string, target *url.URL, headers http.Header, allowed func(*url.URL) bool) (*http.Response, *url.URL, error) {
+	return s.fetchAllowedBody(ctx, method, target, headers, nil, allowed)
+}
+
+func (s *server) fetchAllowedBody(ctx context.Context, method string, target *url.URL, headers http.Header, body []byte, allowed func(*url.URL) bool) (*http.Response, *url.URL, error) {
 	for redirects := 0; redirects <= 5; redirects++ {
 		if !allowed(target) {
 			return nil, nil, errors.New("redirect host not allowed")
 		}
-		request, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
+		var requestBody io.Reader
+		if body != nil {
+			requestBody = bytes.NewReader(body)
+		}
+		request, err := http.NewRequestWithContext(ctx, method, target.String(), requestBody)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -134,6 +146,19 @@ func allowedPlayurl(target *url.URL) bool {
 	}
 	for _, pattern := range playurlPaths {
 		if pattern.MatchString(target.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedGRPCPlayurl(target *url.URL) bool {
+	if target.Scheme != "https" || target.Path != grpcPlayurlPath {
+		return false
+	}
+	host := strings.ToLower(target.Hostname())
+	for _, allowed := range grpcPlayurlHosts {
+		if host == allowed {
 			return true
 		}
 	}

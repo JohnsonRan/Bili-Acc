@@ -18,7 +18,6 @@
     return;
   }
   if (method !== "GET") {
-    log(`skip reason=unsupported_method method=${method || "unknown"}`);
     $done({});
     return;
   }

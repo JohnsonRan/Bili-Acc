@@ -43,10 +43,11 @@ Bili-Acc 是使用 Go 编写的 B 站固定出口媒体代理。它将 playurl A
 ## 当前实现
 
 - `GET /` 健康检查。
-- Token 保护的 `/playurl/` playurl API 转发。
+- Token 保护的 `/playurl/` 网页 playurl API 转发。
+- Token 保护的 `/playurl-grpc/` 原生 App `Player/PlayViewUnite` gRPC 转发。
 - Token 保护的 `/proxy/` 点播视频、音频、直播媒体和 HLS 转发。
-- 支持 `GET`、`HEAD` 和 CORS 预检 `OPTIONS`；其他方法返回 `405`。
-- 支持以下 playurl API：
+- `/playurl/` 和 `/proxy/` 仅支持 `GET`、`HEAD`；`/playurl-grpc/` 仅支持 `POST`；同时支持 CORS 预检 `OPTIONS`。
+- 支持以下网页 playurl API：
   - `/x/player/playurl`
   - `/x/player/wbi/playurl`
   - `/pgc/player/web/playurl`
@@ -167,6 +168,16 @@ https://api.bilibili.com/x/player/wbi/playurl?bvid=...&cid=...
 
 服务只向上游复制必要的 `Accept`、`Accept-Language` 和 `User-Agent`。客户端可通过 `X-Bili-Cookie` 临时传递 Cookie，通过 `X-Bili-Referer` 传递页面来源。
 
+### 原生 gRPC playurl 代理
+
+```text
+POST /playurl-grpc/{token}/{base64url(origin)}/bilibili.app.playerunite.v1.Player/PlayViewUnite
+```
+
+该路由只允许 `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的上述精确方法，完整转发最多 2 MiB 的 protobuf 请求体及必要的 gRPC metadata，并强制上游使用 `grpc-accept-encoding: identity`。响应体和 gRPC trailer 会原样返回。其他主机、路径或 HTTP 方法不会转发。
+
+原生 App 必须先通过此路由获取播放地址，使媒体 URL 的来源 IP 签名绑定到 VPS 出口；随后 `/proxy/` 才能使用同一出口拉取媒体，避免手机直取 playurl、VPS 拉媒体造成的 IP 签名不一致和上游 `403`。
+
 ### 媒体代理
 
 ```text
@@ -267,21 +278,21 @@ Surge 还需要：
 - 安装并信任 Surge CA；
 - 允许模块 MITM playurl API 和媒体 CDN 域名。
 
-网页端请求仍通过 playurl API 响应改写。原生 App 的 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求会直接改写为 Bili-Acc `/proxy/` 地址，并保留 `Range` 等流式请求头。
+网页端请求仍通过 `/playurl/` 响应改写。原生 App 的 `Player/PlayViewUnite` POST 请求会先改写到 Bili-Acc `/playurl-grpc/`，让 B 站按 VPS 出口生成媒体签名；随后 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求改写为 `/proxy/` 地址，并保留 `Range` 等流式请求头。
 
-为避免对共享 CDN `*.akamaized.net` 做全域 MITM，模块参考 BiliUniverse/Redirect 的策略，只 MITM `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的 `Player/PlayViewUnite` 原生播放请求与响应。请求脚本声明 `grpc-accept-encoding: identity`，响应脚本按已知 protobuf 字段结构处理 `DashVideo`/`ResponseUrl`，发现 Akamai 主地址时仅替换为同一媒体项自带的 `bilivideo.com`/`bilivideo.cn`/`biliapi.net` 备用地址，并原样保留未知字段。主模块完全不声明 `akamaized.net` MITM；如果上游仍返回压缩 frame 或没有 B 站备用地址，脚本会明确记录并保持原样。
+为避免对共享 CDN `*.akamaized.net` 做全域 MITM，模块只 MITM `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的 `Player/PlayViewUnite` 原生播放请求与响应。请求脚本在转发到 VPS 时声明 `grpc-accept-encoding: identity`，响应脚本按已知 protobuf 字段结构处理 `DashVideo`/`ResponseUrl`，发现 Akamai 主地址时仅替换为同一媒体项自带的 `bilivideo.com`/`bilivideo.cn`/`biliapi.net` 备用地址，并原样保留未知字段。主模块完全不声明 `akamaized.net` MITM；如果上游仍返回压缩 frame 或没有 B 站备用地址，脚本会明确记录并保持原样。
 
 若模块没有生效，在 Surge 的脚本日志或请求备注中搜索 `[Bili Acc]`；模块已启用 `debug=true`，因此命中脚本的 `console.log()` 会同时写入请求备注。一次正常的点播请求至少应看到：
 
 ```text
 [Bili Acc][request] rewrite api_host=api.bilibili.com api_path=/x/player/wbi/playurl cookie_present=true
 [Bili Acc][response] rewrite status=200 source=proxied_api media_urls=4
-[Bili Acc][grpc-request] compression=identity
+[Bili Acc][grpc-request] rewrite api_host=grpc.biliapi.net compression=identity
 [Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 akamai_urls=1
 [Bili Acc][media-request] rewrite media_host=upos.example.bilivideo.com method=GET range=true
 ```
 
-网页端的 `media_urls` 会随响应内容变化；为 `0` 表示响应脚本执行了，但没有找到受支持的媒体 URL。原生 App 通常会出现 `[grpc-response]` 和/或 `[media-request] rewrite`；`akamai_urls=0` 表示响应内没有可用的 Akamai→B 站备用地址替换。`skip reason=...` 会说明参数无效、请求方法不支持、响应体为空、压缩/无效 protobuf 或 JSON 无法解析等原因。日志只记录 API/媒体主机、无查询参数的 API 路径、状态和计数，不记录 server、Token、Cookie、完整媒体 URL 或查询参数。如果完全没有 `[Bili Acc]` 日志，说明请求脚本没有运行；优先检查模块和 MITM 是否启用、Surge CA 是否已信任、实际请求是否命中模块声明的域名，以及是否有其他模块中更靠前的同类型脚本先匹配了该请求（Surge 对每个请求只运行首个匹配脚本）。
+网页端的 `media_urls` 会随响应内容变化；为 `0` 表示响应脚本执行了，但没有找到受支持的媒体 URL。原生 App 通常会出现 `[grpc-response]` 和/或 `[media-request] rewrite`；`akamai_urls=0` 表示响应内没有可用的 Akamai→B 站备用地址替换。请求方法不支持、媒体域名不匹配或响应与当前代理地址无关等正常放行情况不会打印日志；保留的 `skip reason=...` 仅用于说明参数无效、响应体为空、压缩/无效 protobuf 或 JSON 无法解析等需要排查的情况。日志只记录 API/媒体主机、无查询参数的 API 路径、状态和计数，不记录 server、Token、Cookie、完整媒体 URL 或查询参数。如果完全没有 `[Bili Acc]` 日志，说明请求脚本没有运行，或者请求被正常放行；需要排查时优先检查模块和 MITM 是否启用、Surge CA 是否已信任、实际请求是否命中模块声明的域名，以及是否有其他模块中更靠前的同类型脚本先匹配了该请求（Surge 对每个请求只运行首个匹配脚本）。
 
 ## 安全与运行行为
 

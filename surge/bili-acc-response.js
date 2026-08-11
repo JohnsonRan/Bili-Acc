@@ -28,7 +28,6 @@
   const proxiedPrefix = `${server}/playurl/${encodeURIComponent(token)}/`;
   const requestKind = originalAPI.test(requestURL) ? "original_api" : requestURL.startsWith(proxiedPrefix) ? "proxied_api" : "unrelated";
   if (requestKind === "unrelated") {
-    log("skip reason=unrelated_request");
     $done({});
     return;
   }

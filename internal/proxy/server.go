@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	maxPlaylistSize = 4 << 20
-	copyBufferSize  = 32 << 10
+	maxPlaylistSize    = 4 << 20
+	maxGRPCRequestSize = 2 << 20
+	copyBufferSize     = 32 << 10
 )
 
 var copyBufferPool = sync.Pool{
@@ -143,7 +144,13 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	grpcPlayurl := strings.HasPrefix(r.URL.Path, "/playurl-grpc/")
+	if grpcPlayurl {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+	} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -154,6 +161,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "Bili CF Acc is running")
 	case strings.HasPrefix(r.URL.Path, "/proxy/"):
 		s.handleMedia(w, r)
+	case grpcPlayurl:
+		s.handleGRPCPlayurl(w, r)
 	case strings.HasPrefix(r.URL.Path, "/playurl/"):
 		s.handlePlayurl(w, r)
 	default:
@@ -226,6 +235,65 @@ func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(response.StatusCode)
 	if r.Method != http.MethodHead {
 		s.copyBody(w, response.Body, meta)
+	}
+}
+
+func (s *server) handleGRPCPlayurl(w http.ResponseWriter, r *http.Request) {
+	target, err := s.targetFromRequest(r, "/playurl-grpc/")
+	if err != nil {
+		writeTargetError(w, err)
+		return
+	}
+	meta := requestLogFrom(r)
+	meta.targetHost = target.Hostname()
+	if !allowedGRPCPlayurl(target) {
+		http.Error(w, "gRPC playurl API not allowed", http.StatusForbidden)
+		return
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	if contentType != "application/grpc" && contentType != "application/grpc+proto" {
+		http.Error(w, "Unsupported media type", http.StatusUnsupportedMediaType)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxGRPCRequestSize+1))
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxGRPCRequestSize {
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	headers := copyGRPCRequestHeaders(r.Header)
+	headers.Set("Content-Type", r.Header.Get("Content-Type"))
+	headers.Set("Accept-Encoding", "identity")
+	headers.Set("Grpc-Accept-Encoding", "identity")
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	response, _, err := s.fetchAllowedBody(ctx, r.Method, target, headers, body, allowedGRPCPlayurl)
+	if err != nil {
+		http.Error(w, "Upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	meta.upstreamStatus = response.StatusCode
+	copyResponseHeaders(w.Header(), response.Header)
+	w.Header().Del("Content-Length")
+	announcedTrailers := len(response.Trailer)
+	for name := range response.Trailer {
+		w.Header().Add("Trailer", name)
+	}
+	w.WriteHeader(response.StatusCode)
+	s.copyBody(w, response.Body, meta)
+	if len(response.Trailer) == announcedTrailers {
+		for name, values := range response.Trailer {
+			w.Header()[name] = values
+		}
+		return
+	}
+	for name, values := range response.Trailer {
+		w.Header()[http.TrailerPrefix+name] = values
 	}
 }
 

@@ -254,8 +254,10 @@
   }
 
   function safeEndpoint(value) {
+    const endpoint = "/bilibili.app.playerunite.v1.Player/PlayViewUnite";
     const match = String(value).match(/^https?:\/\/[^/]+(\/[^?#]*)/i);
-    return match ? match[1] : "unknown";
+    if (!match) return "unknown";
+    return match[1].endsWith(endpoint) ? endpoint : "unknown";
   }
 
   function safeToken(value) {
