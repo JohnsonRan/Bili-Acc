@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 40s
+    environment:
+      TOKEN: ${TOKEN}
+      PUBLIC_URL: https://${DOMAIN}
+      ALLOWED_HOSTS: bilivideo.com,bilivideo.cn,biliapi.net,akamaized.net
+    ports:
+      - "127.0.0.1:8964:8080"

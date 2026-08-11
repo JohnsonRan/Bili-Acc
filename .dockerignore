@@ -1,0 +1,6 @@
+.git
+.pi
+.pi-subagents
+.env
+*.exe
+node_modules
