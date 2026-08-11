@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,9 +17,13 @@ import (
 )
 
 const (
-	maxPlaylistSize    = 4 << 20
-	maxGRPCRequestSize = 2 << 20
-	copyBufferSize     = 32 << 10
+	maxPlaylistSize            = 4 << 20
+	maxGRPCRequestSize         = 2 << 20
+	maxGRPCResponseSize        = 8 << 20
+	copyBufferSize             = 32 << 10
+	grpcTunnelContentType      = "application/x-bili-acc-grpc"
+	grpcOriginalContentTypeHdr = "X-Bili-Acc-Grpc-Content-Type"
+	grpcTunnelStatusHdr        = "X-Bili-Acc-Grpc-Status"
 )
 
 var copyBufferPool = sync.Pool{
@@ -284,7 +290,11 @@ func (s *server) handleGRPCPlayurl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
-	if contentType != "application/grpc" && contentType != "application/grpc+proto" {
+	upstreamContentType := contentType
+	if contentType == grpcTunnelContentType {
+		upstreamContentType = strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get(grpcOriginalContentTypeHdr), ";")[0]))
+	}
+	if upstreamContentType != "application/grpc" && upstreamContentType != "application/grpc+proto" {
 		meta.errorStage = "request_body"
 		http.Error(w, "Unsupported media type", http.StatusUnsupportedMediaType)
 		return
@@ -306,7 +316,8 @@ func (s *server) handleGRPCPlayurl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	headers := copyGRPCRequestHeaders(r.Header)
-	headers.Set("Content-Type", r.Header.Get("Content-Type"))
+	headers.Del(grpcOriginalContentTypeHdr)
+	headers.Set("Content-Type", upstreamContentType)
 	headers.Set("Accept-Encoding", "identity")
 	headers.Set("Grpc-Accept-Encoding", "identity")
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -326,18 +337,48 @@ func (s *server) handleGRPCPlayurl(w http.ResponseWriter, r *http.Request) {
 	meta.upstreamHeaderObserved = true
 	defer response.Body.Close()
 	meta.upstreamStatus = response.StatusCode
+	if rawHeaderStatus, ok := headerValue(response.Header, "Grpc-Status"); ok {
+		meta.grpcStatus = normalizeGRPCStatusForWire(rawHeaderStatus)
+	}
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxGRPCResponseSize+1))
+	if err != nil {
+		if requestCancelled(r, err) {
+			if meta.grpcStatus != "" && meta.grpcStatus != "0" {
+				meta.errorStage = "grpc_status"
+				return
+			}
+			if meta.upstreamStatus >= http.StatusBadRequest {
+				meta.errorStage = "upstream_response"
+				return
+			}
+			markRequestCancelled(meta, "response_body")
+			return
+		}
+		meta.errorStage = "response_body"
+		http.Error(w, "Invalid upstream response", http.StatusBadGateway)
+		return
+	}
+	if len(responseBody) > maxGRPCResponseSize {
+		meta.errorStage = "response_body"
+		http.Error(w, "Upstream response too large", http.StatusBadGateway)
+		return
+	}
+	if rawTrailerStatus, ok := headerValue(response.Trailer, "Grpc-Status"); ok {
+		meta.grpcStatus = normalizeGRPCStatusForWire(rawTrailerStatus)
+	} else if meta.grpcStatus == "" {
+		meta.grpcStatus = "2"
+	}
+
 	copyResponseHeaders(w.Header(), response.Header)
 	w.Header().Del("Content-Length")
+	w.Header().Del(grpcTunnelStatusHdr)
+	w.Header().Set(grpcTunnelStatusHdr, meta.grpcStatus)
 	announcedTrailers := len(response.Trailer)
 	for name := range response.Trailer {
 		w.Header().Add("Trailer", name)
 	}
 	w.WriteHeader(response.StatusCode)
-	meta.grpcStatus = sanitizeGRPCStatus(response.Header.Get("Grpc-Status"))
-	s.copyBody(w, response.Body, meta)
-	if trailerStatus := sanitizeGRPCStatus(response.Trailer.Get("Grpc-Status")); trailerStatus != "" {
-		meta.grpcStatus = trailerStatus
-	}
+	s.copyBody(w, bytes.NewReader(responseBody), meta)
 	if len(response.Trailer) == announcedTrailers {
 		for name, values := range response.Trailer {
 			w.Header()[name] = values
@@ -437,6 +478,29 @@ func targetErrorStage(err error) string {
 		return "authorization"
 	}
 	return "target_validation"
+}
+
+func normalizeGRPCStatusForWire(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "2"
+	}
+	status, err := strconv.Atoi(value)
+	if err != nil || status < 0 || status > 16 {
+		return "2"
+	}
+	return strconv.Itoa(status)
+}
+
+func headerValue(headers http.Header, name string) (string, bool) {
+	values, ok := headers[http.CanonicalHeaderKey(name)]
+	if !ok {
+		return "", false
+	}
+	if len(values) == 0 {
+		return "", true
+	}
+	return values[0], true
 }
 
 func requestCancelled(r *http.Request, err error) bool {

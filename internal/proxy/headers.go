@@ -68,7 +68,7 @@ func copyGRPCRequestHeaders(source http.Header) http.Header {
 	for name, values := range source {
 		lower := strings.ToLower(name)
 		proxyMetadata := lower == "forwarded" || lower == "via" || lower == "x-real-ip" || lower == "true-client-ip" || lower == "cdn-loop" || strings.HasPrefix(lower, "x-forwarded-") || strings.HasPrefix(lower, "cf-")
-		if hopHeaders[lower] || proxyMetadata || strings.HasPrefix(lower, "access-control-") || lower == "x-bili-cookie" || lower == "x-bili-referer" {
+		if hopHeaders[lower] || proxyMetadata || strings.HasPrefix(lower, "access-control-") || lower == "x-bili-cookie" || lower == "x-bili-referer" || lower == strings.ToLower(grpcOriginalContentTypeHdr) {
 			continue
 		}
 		if lower == "te" {
@@ -122,7 +122,7 @@ func setCORS(w http.ResponseWriter, r *http.Request) {
 		methods = "POST, OPTIONS"
 	}
 	w.Header().Set("Access-Control-Allow-Methods", methods)
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range, X-Bili-Cookie, X-Bili-Referer")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range, X-Bili-Acc-Grpc-Content-Type, X-Bili-Cookie, X-Bili-Referer")
 	w.Header().Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, Content-Type")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 }

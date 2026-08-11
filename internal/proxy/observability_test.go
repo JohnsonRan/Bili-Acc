@@ -240,9 +240,10 @@ func TestUpstreamFailuresRemainFailuresWhenStreamingIsCancelled(t *testing.T) {
 		grpcStatus    string
 		expected      string
 		expectedStage string
+		expectPanic   bool
 	}{
-		{"media", "/proxy/", http.MethodGet, "https://cdn.bilivideo.com/video.m4s", "", http.StatusForbidden, "", "upstream_rejected", "upstream_response"},
-		{"grpc", "/playurl-grpc/", http.MethodPost, "https://grpc.biliapi.net" + grpcPlayurlPath, "application/grpc", http.StatusOK, "14", "grpc_error", "grpc_status"},
+		{"media", "/proxy/", http.MethodGet, "https://cdn.bilivideo.com/video.m4s", "", http.StatusForbidden, "", "upstream_rejected", "upstream_response", true},
+		{"grpc", "/playurl-grpc/", http.MethodPost, "https://grpc.biliapi.net" + grpcPlayurlPath, "application/grpc", http.StatusOK, "14", "grpc_error", "grpc_status", false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -268,8 +269,12 @@ func TestUpstreamFailuresRemainFailuresWhenStreamingIsCancelled(t *testing.T) {
 			}
 			func() {
 				defer func() {
-					if recovered := recover(); recovered != http.ErrAbortHandler {
+					recovered := recover()
+					if test.expectPanic && recovered != http.ErrAbortHandler {
 						t.Fatalf("panic = %v", recovered)
+					}
+					if !test.expectPanic && recovered != nil {
+						t.Fatalf("unexpected panic = %v", recovered)
 					}
 				}()
 				app.ServeHTTP(httptest.NewRecorder(), request)
@@ -303,6 +308,7 @@ func TestHTTP2GRPCTrailersPropagateClassifyAndStayPrivate(t *testing.T) {
 			t.Fatalf("protocol = %q", r.Proto)
 		}
 		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set(grpcTunnelStatusHdr, "7")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte{0, 0, 0, 0, 0})
 		w.Header().Set(http.TrailerPrefix+"Grpc-Status", "14")
@@ -317,12 +323,16 @@ func TestHTTP2GRPCTrailersPropagateClassifyAndStayPrivate(t *testing.T) {
 	app.logger = testLogger(&logs)
 	app.client.Transport = transportTo(upstream)
 	request := httptest.NewRequest(http.MethodPost, proxyPath("/playurl-grpc/", testToken, "https://grpc.biliapi.net"+grpcPlayurlPath), bytes.NewReader([]byte{0, 0, 0, 0, 0}))
-	request.Header.Set("Content-Type", "application/grpc")
+	request.Header.Set("Content-Type", grpcTunnelContentType)
+	request.Header.Set(grpcOriginalContentTypeHdr, "application/grpc")
 	response := httptest.NewRecorder()
 	app.ServeHTTP(response, request)
 	result := response.Result()
 	defer result.Body.Close()
 	_, _ = io.ReadAll(result.Body)
+	if result.Header.Get(grpcTunnelStatusHdr) != "14" {
+		t.Fatalf("tunneled status header = %q", result.Header.Get(grpcTunnelStatusHdr))
+	}
 	if result.Trailer.Get("Grpc-Status") != "14" || result.Trailer.Get("Grpc-Message") != secretMessage {
 		t.Fatalf("trailers = %v", result.Trailer)
 	}

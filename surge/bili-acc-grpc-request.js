@@ -31,16 +31,23 @@
   }
 
   const headers = {...($request.headers || {})};
+  const originalContentType = getHeader(headers, "content-type").split(";", 1)[0].toLowerCase();
   deleteHeader(headers, "host");
+  deleteHeader(headers, "content-type");
   deleteHeader(headers, "grpc-accept-encoding");
+  deleteHeader(headers, "x-bili-acc-grpc-content-type");
   headers.Host = serverMatch[1];
+  headers["Content-Type"] = "application/x-bili-acc-grpc";
+  headers["X-Bili-Acc-Grpc-Content-Type"] = originalContentType === "application/grpc+proto" ? originalContentType : "application/grpc";
   headers["grpc-accept-encoding"] = "identity";
 
   const origin = match[1];
   const path = match[2] || "/";
   const url = `${server}/playurl-grpc/${encodeURIComponent(token)}/${base64url(origin)}${path}`;
-  log(`rewrite api_host=${hostOf(origin)} compression=identity`);
-  $done({url, headers});
+  const result = {url, headers};
+  if ($request.body instanceof Uint8Array) result.body = $request.body;
+  log(`rewrite api_host=${hostOf(origin)} compression=identity tunnel=http`);
+  $done(result);
 
   function log(message) {
     console.log(`[Bili Acc][grpc-request] ${message}`);
@@ -49,6 +56,11 @@
   function hostOf(origin) {
     const match = String(origin).match(/^https?:\/\/([^/:?#]+)/i);
     return match ? match[1].toLowerCase() : "unknown";
+  }
+
+  function getHeader(headers, name) {
+    const key = Object.keys(headers).find((item) => item.toLowerCase() === name);
+    return key ? String(headers[key]) : "";
   }
 
   function deleteHeader(headers, name) {

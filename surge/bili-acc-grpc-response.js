@@ -16,48 +16,69 @@
     ResponseUrl: {primary: 4, backup: 5},
   };
 
+  const responseHeaders = $response.headers || {};
+  const rawTunnelStatus = getHeader(responseHeaders, "x-bili-acc-grpc-status").trim();
+  const tunneledResponse = hasHeader(responseHeaders, "x-bili-acc-grpc-status") || /\/playurl-grpc\//.test(String($request.url || ""));
+  const parsedTunnelStatus = /^\d{1,2}$/.test(rawTunnelStatus) ? Number(rawTunnelStatus) : -1;
+  const tunnelStatus = tunneledResponse && parsedTunnelStatus >= 0 && parsedTunnelStatus <= 16 ? String(parsedTunnelStatus) : tunneledResponse ? "2" : "";
+  const headers = normalizedResponseHeaders();
   const body = $response.body;
   if (!(body instanceof Uint8Array) || body.length === 0) {
     log("skip reason=empty_binary_body");
-    $done({});
+    passThrough();
     return;
   }
 
   const contentType = getHeader($response.headers || {}, "content-type").split(";", 1)[0].toLowerCase();
   if (contentType !== "application/grpc" && contentType !== "application/grpc+proto") {
     log(`skip reason=unsupported_content_type type=${contentType || "unknown"}`);
-    $done({});
+    passThrough();
     return;
   }
 
-  const result = transformGRPC(body);
+  const encoding = getHeader($response.headers || {}, "grpc-encoding").split(",", 1)[0].trim().toLowerCase();
+  const result = transformGRPC(body, encoding);
   if (!result) {
     log("skip reason=invalid_grpc");
-    $done({});
+    passThrough();
     return;
   }
   if (result.compressed) {
-    const encoding = getHeader($response.headers || {}, "grpc-encoding") || "unknown";
-    log(`skip reason=compressed_frame encoding=${safeToken(encoding)}`);
-    $done({});
+    log(`skip reason=compressed_frame encoding=${safeToken(encoding || "unknown")}`);
+    passThrough();
     return;
   }
 
   const endpoint = safeEndpoint(String($request.url || ""));
-  log(`rewrite endpoint=${endpoint} frames=${result.frames} akamai_urls=${result.rewritten}`);
-  if (result.rewritten === 0) {
-    $done({});
+  log(`rewrite endpoint=${endpoint} frames=${result.frames} akamai_urls=${result.rewritten} decompressed_frames=${result.decompressed}`);
+  if (result.rewritten === 0 && result.decompressed === 0) {
+    $done(tunnelStatus ? {headers} : {});
     return;
   }
 
-  const headers = {...($response.headers || {})};
-  for (const name of ["content-length", "content-md5", "digest", "etag"]) deleteHeader(headers, name);
+  for (const name of ["content-length", "content-encoding", "content-md5", "digest", "etag"]) deleteHeader(headers, name);
+  if (result.decompressed > 0) deleteHeader(headers, "grpc-encoding");
   $done({body: result.bytes, headers});
 
-  function transformGRPC(bytes) {
+  function passThrough() {
+    $done(tunneledResponse ? {headers} : {});
+  }
+
+  function normalizedResponseHeaders() {
+    const headers = {...($response.headers || {})};
+    deleteHeader(headers, "x-bili-acc-grpc-status");
+    if (tunneledResponse) {
+      deleteHeader(headers, "grpc-status");
+      headers["Grpc-Status"] = tunnelStatus;
+    }
+    return headers;
+  }
+
+  function transformGRPC(bytes, compression) {
     const chunks = [];
     let offset = 0;
     let rewritten = 0;
+    let decompressed = 0;
     let frames = 0;
     while (offset < bytes.length) {
       if (offset + 5 > bytes.length) return null;
@@ -65,14 +86,29 @@
       const length = ((bytes[offset + 1] << 24) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 8) | bytes[offset + 4]) >>> 0;
       const end = offset + 5 + length;
       if (end > bytes.length) return null;
-      if ((flags & 1) !== 0) return {bytes, rewritten: 0, frames: frames + 1, compressed: true};
 
-      const transformed = transformMessage(bytes.slice(offset + 5, end), "PlayViewUniteReply");
+      let payload = bytes.slice(offset + 5, end);
+      let outputFlags = flags;
+      if ((flags & 1) !== 0) {
+        if (compression !== "gzip" || typeof $utils === "undefined" || typeof $utils.ungzip !== "function") {
+          return {bytes, rewritten: 0, decompressed: 0, frames: frames + 1, compressed: true};
+        }
+        try {
+          payload = $utils.ungzip(payload);
+        } catch (_) {
+          return null;
+        }
+        if (!(payload instanceof Uint8Array)) return null;
+        outputFlags = flags & 254;
+        decompressed++;
+      }
+
+      const transformed = transformMessage(payload, "PlayViewUniteReply");
       if (!transformed.valid) return null;
       rewritten += transformed.rewritten;
       frames++;
       const header = new Uint8Array(5);
-      header[0] = flags;
+      header[0] = outputFlags;
       const transformedLength = transformed.bytes.length;
       header[1] = (transformedLength >>> 24) & 255;
       header[2] = (transformedLength >>> 16) & 255;
@@ -81,7 +117,7 @@
       chunks.push(header, transformed.bytes);
       offset = end;
     }
-    return {bytes: concat(chunks), rewritten, frames, compressed: false};
+    return {bytes: concat(chunks), rewritten, decompressed, frames, compressed: false};
   }
 
   function transformMessage(bytes, type) {
@@ -262,6 +298,10 @@
 
   function safeToken(value) {
     return /^[A-Za-z0-9._-]{1,32}$/.test(value) ? value : "unknown";
+  }
+
+  function hasHeader(headers, name) {
+    return Object.keys(headers).some((item) => item.toLowerCase() === name);
   }
 
   function getHeader(headers, name) {

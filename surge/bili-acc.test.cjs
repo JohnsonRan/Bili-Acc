@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const zlib = require("node:zlib");
 
 function runScript(name, globals) {
   let result;
@@ -138,13 +139,15 @@ test("routine Surge pass-through conditions do not log", () => {
 
 test("gRPC request routes playurl through the fixed-egress server", () => {
   const logs = [];
+  const body = Uint8Array.from([0, 0, 0, 0, 2, 8, 1]);
   const result = runScript("bili-acc-grpc-request.js", {
     console: {log: (message) => logs.push(String(message))},
     $argument: "https://bili.example.com|test-token",
     $request: {
       method: "POST",
       url: "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite",
-      headers: {Host: "grpc.biliapi.net", "grpc-accept-encoding": "gzip,identity", "User-Agent": "Bilibili iOS"},
+      headers: {Host: "grpc.biliapi.net", "Content-Type": "application/grpc+proto", "grpc-accept-encoding": "gzip,identity", "User-Agent": "Bilibili iOS"},
+      body,
     },
   });
   assert.match(result.url, /^https:\/\/bili\.example\.com\/playurl-grpc\/test-token\//);
@@ -152,9 +155,12 @@ test("gRPC request routes playurl through the fixed-egress server", () => {
   const encodedOrigin = new URL(result.url).pathname.split("/")[3];
   assert.equal(Buffer.from(encodedOrigin, "base64url").toString(), "https://grpc.biliapi.net");
   assert.equal(result.headers.Host, "bili.example.com");
+  assert.equal(result.headers["Content-Type"], "application/x-bili-acc-grpc");
+  assert.equal(result.headers["X-Bili-Acc-Grpc-Content-Type"], "application/grpc+proto");
   assert.equal(result.headers["grpc-accept-encoding"], "identity");
   assert.equal(result.headers["User-Agent"], "Bilibili iOS");
-  assert.deepEqual(logs, ["[Bili Acc][grpc-request] rewrite api_host=grpc.biliapi.net compression=identity"]);
+  assert.deepEqual(Buffer.from(result.body), Buffer.from(body));
+  assert.deepEqual(logs, ["[Bili Acc][grpc-request] rewrite api_host=grpc.biliapi.net compression=identity tunnel=http"]);
   assert.doesNotMatch(logs[0], /test-token|PlayViewUnite/);
 });
 
@@ -175,7 +181,7 @@ test("gRPC response replaces Akamai URLs with Bilibili backup URLs", () => {
     },
     $response: {
       status: 200,
-      headers: {"Content-Type": "application/grpc", "Content-Length": "123"},
+      headers: {"Content-Type": "application/grpc", "Content-Length": "123", "X-Bili-Acc-Grpc-Status": "0"},
       body: grpcFrame(reply),
     },
   });
@@ -184,8 +190,43 @@ test("gRPC response replaces Akamai URLs with Bilibili backup URLs", () => {
   assert.doesNotMatch(rewritten, /akamaized\.net/);
   assert.match(rewritten, /upos-sz-mirrorali\.bilivideo\.com/);
   assert.equal(result.headers["Content-Length"], undefined);
-  assert.deepEqual(logs, ["[Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 akamai_urls=1"]);
+  assert.equal(result.headers["X-Bili-Acc-Grpc-Status"], undefined);
+  assert.equal(result.headers["Grpc-Status"], "0");
+  assert.deepEqual(logs, ["[Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 akamai_urls=1 decompressed_frames=0"]);
   assert.doesNotMatch(logs[0], /test-token|aHR0|deadline=|video\.m4s/);
+});
+
+test("gRPC response restores tunneled status even without URL rewrites", () => {
+  const dashVideo = protobufBytesField(1, "https://cdn.bilivideo.com/main.m4s");
+  const reply = protobufBytesField(1, protobufBytesField(5, protobufBytesField(2, dashVideo)));
+  const result = runScript("bili-acc-grpc-response.js", {
+    $request: {url: "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite", headers: {}},
+    $response: {headers: {"Content-Type": "application/grpc", "Grpc-Status": "0", "X-Bili-Acc-Grpc-Status": "14"}, body: grpcFrame(reply)},
+  });
+  assert.equal(result.body, undefined);
+  assert.equal(result.headers["X-Bili-Acc-Grpc-Status"], undefined);
+  assert.equal(result.headers["Grpc-Status"], "14");
+});
+
+test("gRPC response restores tunneled status on every pass-through path", () => {
+  const cases = [
+    {name: "empty", headers: {"Content-Type": "application/grpc", "X-Bili-Acc-Grpc-Status": "14"}, body: undefined, status: "14"},
+    {name: "malformed", headers: {"Content-Type": "application/grpc", "X-Bili-Acc-Grpc-Status": "14"}, body: Uint8Array.from([0, 0, 0]), status: "14"},
+    {name: "compressed", headers: {"Content-Type": "application/grpc", "Grpc-Status": "0", "grpc-encoding": "br", "X-Bili-Acc-Grpc-Status": "14"}, body: grpcFrame(Buffer.from([8, 1]), true), status: "14"},
+    {name: "invalid-status", headers: {"Content-Type": "application/grpc", "Grpc-Status": "0", "X-Bili-Acc-Grpc-Status": "unknown"}, body: undefined, status: "2"},
+    {name: "missing-status", headers: {"Content-Type": "application/grpc", "Grpc-Status": "0"}, body: undefined, status: "2", url: "https://bili.example.com/playurl-grpc/token/origin/bilibili.app.playerunite.v1.Player/PlayViewUnite"},
+    {name: "empty-status", headers: {"Content-Type": "application/grpc", "Grpc-Status": "0", "X-Bili-Acc-Grpc-Status": "   "}, body: undefined, status: "2", url: "https://bili.example.com/playurl-grpc/token/origin/bilibili.app.playerunite.v1.Player/PlayViewUnite"},
+  ];
+  for (const item of cases) {
+    const result = runScript("bili-acc-grpc-response.js", {
+      console: {log() {}},
+      $request: {url: item.url || "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite", headers: {}},
+      $response: {headers: item.headers, body: item.body},
+    });
+    assert.equal(result.headers["X-Bili-Acc-Grpc-Status"], undefined, item.name);
+    assert.equal(result.headers["Grpc-Status"], item.status, item.name);
+    assert.equal(result.body, undefined, item.name);
+  }
 });
 
 test("gRPC response preserves opaque bytes and protobuf groups", () => {
@@ -207,16 +248,38 @@ test("gRPC response preserves opaque bytes and protobuf groups", () => {
   assert.equal(rewritten.includes(unknownGroup), true);
 });
 
-test("gRPC response explicitly skips compressed frames", () => {
+test("gRPC response decompresses gzip frames before rewriting", () => {
+  const akamai = "https://video.example.akamaized.net/main.m4s";
+  const backup = "https://cdn.bilivideo.com/backup.m4s";
+  const dashVideo = Buffer.concat([protobufBytesField(1, akamai), protobufBytesField(2, backup)]);
+  const reply = protobufBytesField(1, protobufBytesField(5, protobufBytesField(2, dashVideo)));
+  const compressed = zlib.gzipSync(reply);
+  const logs = [];
+  const result = runScript("bili-acc-grpc-response.js", {
+    console: {log: (message) => logs.push(String(message))},
+    $utils: {ungzip: (value) => Uint8Array.from(zlib.gunzipSync(Buffer.from(value)))},
+    $request: {url: "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite", headers: {}},
+    $response: {headers: {"Content-Type": "application/grpc", "Content-Encoding": "gzip", "grpc-encoding": "gzip"}, body: grpcFrame(compressed, true)},
+  });
+  const rewritten = Buffer.from(result.body);
+  assert.equal(rewritten[0], 0);
+  assert.doesNotMatch(rewritten.toString("latin1"), /akamaized\.net/);
+  assert.match(rewritten.toString("latin1"), /cdn\.bilivideo\.com/);
+  assert.equal(result.headers["grpc-encoding"], undefined);
+  assert.equal(result.headers["Content-Encoding"], undefined);
+  assert.deepEqual(logs, ["[Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 akamai_urls=1 decompressed_frames=1"]);
+});
+
+test("gRPC response skips unsupported compressed frames", () => {
   const logs = [];
   const payload = protobufBytesField(1, "https://video.example.akamaized.net/main.m4s");
   const result = runScript("bili-acc-grpc-response.js", {
     console: {log: (message) => logs.push(String(message))},
     $request: {url: "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite", headers: {}},
-    $response: {headers: {"Content-Type": "application/grpc", "grpc-encoding": "gzip"}, body: grpcFrame(payload, true)},
+    $response: {headers: {"Content-Type": "application/grpc", "grpc-encoding": "br"}, body: grpcFrame(payload, true)},
   });
   assert.equal(Object.keys(result).length, 0);
-  assert.deepEqual(logs, ["[Bili Acc][grpc-response] skip reason=compressed_frame encoding=gzip"]);
+  assert.deepEqual(logs, ["[Bili Acc][grpc-response] skip reason=compressed_frame encoding=br"]);
 });
 
 test("media request script rejects Akamai and unrelated hosts", () => {
@@ -372,6 +435,9 @@ test("module declares native gRPC rewriting and scoped MITM hosts", () => {
   const grpcRequestLine = scriptLines.find((line) => line.includes("bili-acc-grpc-request.js"));
   assert.match(grpcRequestLine, /type=http-request/);
   assert.match(grpcRequestLine, /argument="\{\{\{server\}\}\}\|\{\{\{token\}\}\}"/);
+  assert.match(grpcRequestLine, /requires-body=true/);
+  assert.match(grpcRequestLine, /binary-body-mode=true/);
+  assert.match(grpcRequestLine, /max-size=2097152/);
   const requestScriptLines = scriptLines.filter((line) => line.includes("type=http-request"));
   for (const host of ["grpc.biliapi.net", "app.bilibili.com", "app.biliapi.net"]) {
     const url = `https://${host}/bilibili.app.playerunite.v1.Player/PlayViewUnite`;
