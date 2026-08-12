@@ -42,8 +42,6 @@ func normalizePlayViewUniteRequest(body []byte, grpcEncoding string) ([]byte, bo
 			return body, false
 		}
 		payload = decoded
-	} else if body[0] != 0 {
-		return body, false
 	}
 
 	normalized, ok := removeProtobufField(payload, playViewUniteAdExtraField)

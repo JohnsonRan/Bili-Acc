@@ -202,6 +202,31 @@ test("gRPC response wraps each media URL without changing its origin", () => {
   assert.doesNotMatch(logs[0], /test-token|aHR0|deadline=|video\.m4s/);
 });
 
+test("gRPC response skips fallback registration for a single URL", () => {
+  const media = "https://cdn.bilivideo.com/single.m4s";
+  const dashVideo = protobufBytesField(1, media);
+  const reply = protobufBytesField(1, protobufBytesField(5, protobufBytesField(2, dashVideo)));
+  let registrations = 0;
+  const result = runScript("bili-acc-grpc-response.js", {
+    $httpClient: {post() { registrations += 1; }},
+    $request: {url: "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite", headers: {}},
+    $response: {headers: {"Content-Type": "application/grpc"}, body: grpcFrame(reply)},
+  });
+  assert.equal(registrations, 0);
+  assert.equal(Buffer.from(result.body).toString("latin1").includes(proxiedMediaURL(media)), true);
+});
+
+test("gRPC response ignores media-shaped URLs on unapproved hosts", () => {
+  const media = "https://cdn.example.com/untrusted.m4s";
+  const dashVideo = protobufBytesField(1, media);
+  const reply = protobufBytesField(1, protobufBytesField(5, protobufBytesField(2, dashVideo)));
+  const result = runScript("bili-acc-grpc-response.js", {
+    $request: {url: "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite", headers: {}},
+    $response: {headers: {"Content-Type": "application/grpc"}, body: grpcFrame(reply)},
+  });
+  assert.equal(result.body, undefined);
+});
+
 test("gRPC response uses registered backend fallback groups when available", () => {
   const akamai = "https://upos-sz-mirrorcosov.bilivideo.com/main.m4s";
   const preferred = "https://upos-sz-mirrorali.bilivideo.com/preferred.m4s";
@@ -226,6 +251,24 @@ test("gRPC response uses registered backend fallback groups when available", () 
   for (let index = 0; index < 3; index++) {
     assert.match(rewritten, new RegExp(`https://bili\\.example\\.com/proxy-group/test-token/0123456789abcdef0123456789abcdef/${index}`));
   }
+});
+
+test("gRPC response keeps fallback group IDs aligned across frames", () => {
+  const first = ["https://a.bilivideo.com/first.m4s", "https://b.bilivideo.com/first-backup.m4s"];
+  const second = ["https://c.bilivideo.com/second.m4s", "https://d.bilivideo.com/second-backup.m4s"];
+  const reply = (urls) => protobufBytesField(1, protobufBytesField(5, protobufBytesField(2,
+    Buffer.concat([protobufBytesField(1, urls[0]), protobufBytesField(2, urls[1])]))));
+  const body = Uint8Array.from(Buffer.concat([Buffer.from(grpcFrame(reply(first))), Buffer.from(grpcFrame(reply(second))) ]));
+  const result = runScript("bili-acc-grpc-response.js", {
+    $httpClient: {post(_options, callback) {
+      callback(null, {status: 200}, JSON.stringify({ids: ["11111111111111111111111111111111", "22222222222222222222222222222222"]}));
+    }},
+    $request: {url: "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite", headers: {}},
+    $response: {headers: {"Content-Type": "application/grpc"}, body},
+  });
+  const rewritten = Buffer.from(result.body).toString("latin1");
+  assert.match(rewritten, /proxy-group\/test-token\/11111111111111111111111111111111\/0/);
+  assert.match(rewritten, /proxy-group\/test-token\/22222222222222222222222222222222\/0/);
 });
 
 test("gRPC response rewrites regular, Dolby, and lossless audio URLs", () => {

@@ -130,7 +130,12 @@ func run() error {
 	for _, item := range bound {
 		if err := item.server.Shutdown(shutdownCtx); err != nil {
 			logger.Warn("graceful shutdown failed", "event", "shutdown_failed", "listener", item.name, "error", err)
-			_ = item.server.Close()
+			if closeErr := item.server.Close(); closeErr != nil {
+				logger.Warn("forced shutdown failed", "event", "shutdown_close_failed", "listener", item.name, "error", closeErr)
+			}
+			if runErr == nil {
+				runErr = fmt.Errorf("shutdown %s listener: %w", item.name, err)
+			}
 		}
 	}
 	return runErr

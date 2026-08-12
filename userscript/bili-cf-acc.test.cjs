@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadScript() {
+function loadScript(options = {}) {
   const fetchCalls = [];
   let cookieValue = "secret";
   let cookieReads = 0;
@@ -43,7 +43,12 @@ function loadScript() {
       return this._referrerPolicy;
     }
   }
-  class RootResponse extends Response {}
+  class RootResponse extends Response {
+    clone() {
+      const cloned = super.clone();
+      return new RootResponse(cloned.body, cloned);
+    }
+  }
   const root = {
     btoa: (value) => Buffer.from(value, "binary").toString("base64"),
     console,
@@ -54,7 +59,10 @@ function loadScript() {
       if (url.includes("/media-groups/")) {
         return new RootResponse('{"ids":["0123456789abcdef0123456789abcdef"]}', {status: 200, headers: {"content-type": "application/json"}});
       }
-      return new RootResponse('{"data":{"dash":{"video":[{"baseUrl":"https://cdn.bilivideo.com/a.m4s","backupUrl":["https://backup.bilivideo.com/a.m4s"]}]},"url":"https://cdn.bilivideo.com/a.m4s"}}', {
+      const playurlBody = options.backupFirst
+        ? '{"data":{"dash":{"video":[{"backupUrl":["https://backup.bilivideo.com/a.m4s"],"baseUrl":"https://cdn.bilivideo.com/a.m4s"}]},"url":"https://cdn.bilivideo.com/a.m4s"}}'
+        : '{"data":{"dash":{"video":[{"baseUrl":"https://cdn.bilivideo.com/a.m4s","backupUrl":["https://backup.bilivideo.com/a.m4s"]}]},"url":"https://cdn.bilivideo.com/a.m4s"}}';
+      return new RootResponse(playurlBody, {
         headers: { "content-type": "application/json" },
       });
     },
@@ -65,11 +73,26 @@ function loadScript() {
     Response: RootResponse,
     XMLHttpRequest: FakeXHR,
   };
+  if (options.playinfoAccessor) {
+    let playinfoValue = options.playinfoAccessor.initial;
+    Object.defineProperty(root, "__playinfo__", {
+      configurable: true,
+      get() {
+        options.playinfoAccessor.gets += 1;
+        return playinfoValue;
+      },
+      set(value) {
+        options.playinfoAccessor.sets += 1;
+        playinfoValue = value;
+      },
+    });
+  }
   const context = {
     unsafeWindow: root,
     GM_cookie: {
       list(_details, callback) {
         cookieReads += 1;
+        if (options.cookieError) throw options.cookieError;
         callback([{ name: "SESSDATA", value: cookieValue }]);
       },
     },
@@ -99,6 +122,13 @@ function loadScript() {
   };
 }
 
+test("keeps media group indexes stable when backup fields appear first", async () => {
+  const { root } = loadScript({backupFirst: true});
+  const parsed = await (await root.fetch("https://api.bilibili.com/x/player/playurl?cid=1")).json();
+  assert.match(parsed.data.dash.video[0].baseUrl, /\/0$/);
+  assert.match(parsed.data.dash.video[0].backupUrl[0], /\/1$/);
+});
+
 test("routes playurl fetch through server with login cookie", async () => {
   const { root, fetchCalls } = loadScript();
   const response = await root.fetch("https://api.bilibili.com/x/player/playurl?bvid=BV1&cid=1");
@@ -110,6 +140,15 @@ test("routes playurl fetch through server with login cookie", async () => {
   assert.match(parsed.data.dash.video[0].baseUrl, /\/proxy-group\/replace-with-the-same-token-as-the-server\/0123456789abcdef0123456789abcdef\/0$/);
   assert.match(parsed.data.dash.video[0].backupUrl[0], /\/proxy-group\/replace-with-the-same-token-as-the-server\/0123456789abcdef0123456789abcdef\/1$/);
   assert.equal(fetchCalls.length, 2);
+});
+
+test("rewrites cloned playurl responses", async () => {
+  const { root } = loadScript();
+  const response = await root.fetch("https://api.bilibili.com/x/player/playurl?cid=1");
+  const json = await response.clone().json();
+  assert.match(json.data.url, /^https:\/\/bili\.example\.com\/proxy\//);
+  const text = await response.clone().text();
+  assert.match(text, /https:\/\/bili\.example\.com\/proxy\//);
 });
 
 test("preserves Request options and leaves unrelated fetch responses alone", async () => {
@@ -159,8 +198,30 @@ test("routes playurl XHR and rewrites media URLs", async () => {
   assert.match(xhr.opened.url, /^https:\/\/bili\.example\.com\/playurl\/replace-with-the-same-token-as-the-server\//);
   assert.equal(xhr.headers.get("X-Bili-Cookie"), "SESSDATA=secret");
 
-  const parsed = root.JSON.parse('{"data":{"dash":{"video":[{"baseUrl":"https://cdn.bilivideo.com/a.m4s"}]}}}');
-  assert.match(parsed.data.dash.video[0].baseUrl, /^https:\/\/bili\.example\.com\/proxy\//);
+  xhr._response = {data: {dash: {video: [{baseUrl: "https://cdn.bilivideo.com/a.m4s"}]}}};
+  assert.match(xhr.response.data.dash.video[0].baseUrl, /^https:\/\/bili\.example\.com\/proxy\//);
+});
+
+test("does not globally rewrite unrelated JSON.parse calls", () => {
+  const { root } = loadScript();
+  const parsed = root.JSON.parse('{"asset":{"url":"https://cdn.bilivideo.com/unrelated.m4s"}}');
+  assert.equal(parsed.asset.url, "https://cdn.bilivideo.com/unrelated.m4s");
+});
+
+test("preserves existing configurable playinfo accessors", () => {
+  const accessor = {gets: 0, sets: 0, initial: {data: {url: "https://cdn.bilivideo.com/initial.m4s"}}};
+  const { root } = loadScript({playinfoAccessor: accessor});
+  assert.match(root.__playinfo__.data.url, /^https:\/\/bili\.example\.com\/proxy\//);
+  root.__playinfo__ = {data: {url: "https://cdn.bilivideo.com/next.m4s"}};
+  assert.equal(accessor.sets, 1);
+  assert.match(root.__playinfo__.data.url, /^https:\/\/bili\.example\.com\/proxy\//);
+  assert.ok(accessor.gets >= 2);
+});
+
+test("falls back to document cookies when GM_cookie throws", async () => {
+  const { root, fetchCalls } = loadScript({cookieError: new Error("cookie unavailable")});
+  await root.fetch("https://api.bilibili.com/x/player/playurl?cid=1");
+  assert.equal(fetchCalls[0].input.headers.get("X-Bili-Cookie"), "buvid3=visible");
 });
 
 test("rewrites initial page playinfo before the first quality switch", () => {

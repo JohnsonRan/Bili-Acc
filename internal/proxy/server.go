@@ -78,10 +78,6 @@ type loggingResponseWriter struct {
 	onWrite func(int64)
 }
 
-func New(token, publicURL, allowedHosts string) http.Handler {
-	return newServer(token, publicURL, splitHosts(allowedHosts))
-}
-
 func (w *loggingResponseWriter) WriteHeader(status int) {
 	if w.status != 0 {
 		return
@@ -259,7 +255,12 @@ func (s *server) handleMediaTargets(w http.ResponseWriter, r *http.Request, targ
 			http.Error(w, "Invalid playlist", http.StatusBadGateway)
 			return
 		}
-		rewritten, err := s.rewritePlaylist(string(body), finalURL, s.publicBase(r))
+		if s.publicURL == "" {
+			meta.errorStage = "playlist"
+			http.Error(w, "PUBLIC_URL is required for playlists", http.StatusBadGateway)
+			return
+		}
+		rewritten, err := s.rewritePlaylist(string(body), finalURL, s.publicURL)
 		if err != nil {
 			meta.errorStage = "playlist"
 			http.Error(w, "Invalid playlist URL", http.StatusBadGateway)

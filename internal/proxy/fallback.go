@@ -226,8 +226,6 @@ func retryableMediaStatus(status int) bool {
 }
 
 func (s *server) fetchMediaCandidates(ctx context.Context, method string, candidates []*url.URL, headers http.Header) (*http.Response, *url.URL, error) {
-	var lastResponse *http.Response
-	var lastTarget *url.URL
 	var lastErr error
 	for index, target := range candidates {
 		response, finalURL, err := s.fetchAllowed(ctx, method, target, headers, func(candidate *url.URL) bool {
@@ -240,14 +238,10 @@ func (s *server) fetchMediaCandidates(ctx context.Context, method string, candid
 			}
 			continue
 		}
-		lastResponse, lastTarget = response, finalURL
 		if !retryableMediaStatus(response.StatusCode) || index == len(candidates)-1 {
 			return response, finalURL, nil
 		}
 		response.Body.Close()
-	}
-	if lastResponse != nil {
-		return lastResponse, lastTarget, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no media candidates")

@@ -832,6 +832,28 @@ func TestPlaylistRangeIsRemovedAndPartialResponseRejected(t *testing.T) {
 	}
 }
 
+func TestPlaylistRequiresConfiguredPublicURL(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		_, _ = io.WriteString(w, "segment.ts")
+	}))
+	defer upstream.Close()
+
+	app := newServer(testToken, "", defaultMediaHosts)
+	app.client.Transport = transportTo(upstream)
+	request := httptest.NewRequest(http.MethodGet, proxyPath("/proxy/", testToken, "http://live.bilivideo.com/index.m3u8"), nil)
+	request.Host = "attacker.example"
+	request.Header.Set("X-Forwarded-Proto", "https")
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if strings.Contains(response.Body.String(), testToken) || strings.Contains(response.Body.String(), "attacker.example") {
+		t.Fatalf("response leaked proxy details: %q", response.Body.String())
+	}
+}
+
 func TestUpstreamCannotOverrideCORS(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "https://evil.example")

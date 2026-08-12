@@ -21,6 +21,7 @@
     DashItem: {primary: 2, backup: 3},
     ResponseUrl: {primary: 4, backup: 5},
   };
+  const MEDIA_HOSTS = ["bilivideo.com", "bilivideo.cn", "biliapi.net", "akamaized.net"];
 
   if (!/^https:\/\/[^/]+$/i.test(server) || !token) {
     log("skip reason=invalid_arguments");
@@ -144,9 +145,10 @@
 
   function transformPreparedGRPC(prepared, groupIDs) {
     const chunks = [];
+    const groupIndex = {value: 0};
     let rewritten = 0;
     for (const frame of prepared.frames) {
-      const transformed = transformMessage(frame.payload, "PlayViewUniteReply", groupIDs, {value: 0});
+      const transformed = transformMessage(frame.payload, "PlayViewUniteReply", groupIDs, groupIndex);
       if (!transformed.valid) return null;
       rewritten += transformed.rewritten;
       const header = new Uint8Array(5);
@@ -175,7 +177,7 @@
         .filter((field) => (field.number === layout.primary || field.number === layout.backup) && field.wireType === 2)
         .map((field) => asciiURL(field.payload))
         .filter(isMediaURL);
-      if (urls.length > 0) groups.push(urls);
+      if (urls.length > 1) groups.push(urls);
     }
     return {valid: true};
   }
@@ -203,8 +205,8 @@
     const layout = URL_LAYOUTS[type];
     if (layout) {
       const mediaFields = fields.filter((field) => (field.number === layout.primary || field.number === layout.backup) && field.wireType === 2 && isMediaURL(asciiURL(field.payload)));
-      const groupID = groupIDs[groupIndex.value] || "";
-      if (mediaFields.length > 0) groupIndex.value++;
+      const groupID = mediaFields.length > 1 ? groupIDs[groupIndex.value] || "" : "";
+      if (mediaFields.length > 1) groupIndex.value++;
       for (let index = 0; index < mediaFields.length; index++) {
         const field = mediaFields[index];
         const mediaURL = asciiURL(field.payload);
@@ -321,7 +323,14 @@
   }
 
   function isMediaURL(value) {
-    return /^https?:\/\/[^/]+\//i.test(String(value));
+    try {
+      const parsed = new URL(String(value));
+      const host = parsed.hostname.toLowerCase();
+      return (parsed.protocol === "http:" || parsed.protocol === "https:")
+        && MEDIA_HOSTS.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+    } catch (_) {
+      return false;
+    }
   }
 
   function proxyGroupURL(id, preferred) {

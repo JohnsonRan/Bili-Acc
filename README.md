@@ -220,7 +220,7 @@ playlist 中出现不在媒体白名单内的目标时，整个请求返回 `502
 |---|---|---|
 | `TOKEN` | 无，必填 | 私有代理令牌，同时配置到用户脚本或 Surge 模块。 |
 | `LISTEN_ADDR` | `:8080` | Go HTTP 服务监听地址。Compose 使用容器内默认值。 |
-| `PUBLIC_URL` | 从请求推断 | HLS 改写生成的公开服务地址。Compose 设置为 `https://${DOMAIN}`。 |
+| `PUBLIC_URL` | 无 | HLS 改写生成的公开服务地址。处理 HLS 时必填，避免信任客户端可控的 Host/转发头；Compose 设置为 `https://${DOMAIN}`。 |
 | `ALLOWED_HOSTS` | B 站媒体域名 | 逗号分隔的媒体域名后缀白名单。 |
 | `LOG_FORMAT` | `text` | 日志格式，可选 `text` 或 `json`。 |
 | `LOG_LEVEL` | `info` | `debug`、`info`、`warn` 或 `error`。 |

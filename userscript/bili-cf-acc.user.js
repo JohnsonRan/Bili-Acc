@@ -99,14 +99,24 @@
 
       const group = groupMap.get(current);
       const groupedFields = new Set(group ? group.fields : []);
-      let preferred = 0;
+      const groupIndexes = new Map();
+      if (group) {
+        group.urls.forEach((url, index) => {
+          const indexes = groupIndexes.get(url) || [];
+          indexes.push(index);
+          groupIndexes.set(url, indexes);
+        });
+      }
+      const rewriteGroupedUrl = (item) => {
+        const indexes = groupIndexes.get(item);
+        if (!indexes || indexes.length === 0) return proxyUrl(item);
+        return `${SERVER.replace(/\/$/, "")}/proxy-group/${encodeURIComponent(TOKEN)}/${encodeURIComponent(group.id)}/${indexes.shift()}`;
+      };
       for (const [key, child] of Object.entries(current)) {
         if (groupedFields.has(key) && typeof child === "string" && isMediaUrl(child)) {
-          current[key] = `${SERVER.replace(/\/$/, "")}/proxy-group/${encodeURIComponent(TOKEN)}/${encodeURIComponent(group.id)}/${preferred++}`;
+          current[key] = rewriteGroupedUrl(child);
         } else if (groupedFields.has(key) && Array.isArray(child)) {
-          current[key] = child.map((item) => (typeof item === "string" && isMediaUrl(item)
-            ? `${SERVER.replace(/\/$/, "")}/proxy-group/${encodeURIComponent(TOKEN)}/${encodeURIComponent(group.id)}/${preferred++}`
-            : item));
+          current[key] = child.map((item) => (typeof item === "string" && isMediaUrl(item) ? rewriteGroupedUrl(item) : item));
         } else if (URL_KEYS.has(key) && typeof child === "string" && isMediaUrl(child)) {
           current[key] = proxyUrl(child);
         } else if (URL_KEYS.has(key) && Array.isArray(child)) {
@@ -141,7 +151,16 @@
   for (const name of ["__playinfo__", "__NEPTUNE_IS_MY_WAIFU__"]) {
     const descriptor = Object.getOwnPropertyDescriptor(root, name);
     if (descriptor && !descriptor.configurable) continue;
-    let value = descriptor && "value" in descriptor ? rewrite(descriptor.value) : undefined;
+    if (descriptor && (descriptor.get || descriptor.set)) {
+      Object.defineProperty(root, name, {
+        configurable: true,
+        enumerable: descriptor.enumerable,
+        get: descriptor.get ? function () { return rewrite(descriptor.get.call(this)); } : undefined,
+        set: descriptor.set ? function (next) { descriptor.set.call(this, rewrite(next)); } : undefined,
+      });
+      continue;
+    }
+    let value = descriptor ? rewrite(descriptor.value) : undefined;
     Object.defineProperty(root, name, {
       configurable: true,
       enumerable: descriptor?.enumerable ?? true,
@@ -175,7 +194,10 @@
   const getCookies = () => {
     if (Date.now() < cookieExpires) return Promise.resolve(cookieValue);
     if (!cookiePending) {
-      cookiePending = readCookies().then((value) => {
+      cookiePending = readCookies().catch((error) => {
+        console.warn("Bili CF Acc: cookie lookup failed", error);
+        return root.document.cookie;
+      }).then((value) => {
         cookieValue = value;
         cookieExpires = Date.now() + COOKIE_CACHE_MS;
         return value;
@@ -187,6 +209,14 @@
   };
 
   const proxiedFetchResponses = new WeakSet();
+  const nativeClone = root.Response?.prototype.clone;
+  if (nativeClone) {
+    root.Response.prototype.clone = function (...args) {
+      const cloned = nativeClone.apply(this, args);
+      if (proxiedFetchResponses.has(this)) proxiedFetchResponses.add(cloned);
+      return cloned;
+    };
+  }
   const nativeFetch = root.fetch;
   if (nativeFetch) {
     root.fetch = async function (input, init) {
@@ -226,11 +256,6 @@
       this.setRequestHeader("X-Bili-Referer", root.location.href);
       nativeSend.call(this, body);
     });
-  };
-
-  root.JSON.parse = function (...args) {
-    const parsed = nativeParse.apply(this, args);
-    return typeof args[0] === "string" && MEDIA_URL_HINT.test(args[0]) ? rewrite(parsed) : parsed;
   };
 
   const nativeJson = root.Response?.prototype.json;

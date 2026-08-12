@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -52,20 +51,6 @@ func (s *server) rewritePlaylist(body string, baseURL *url.URL, publicBase strin
 		}
 	}
 	return strings.Join(lines, "\n"), nil
-}
-
-func (s *server) publicBase(r *http.Request) string {
-	if s.publicURL != "" {
-		return s.publicURL
-	}
-	scheme := r.Header.Get("X-Forwarded-Proto")
-	if scheme != "http" && scheme != "https" {
-		scheme = "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-	}
-	return scheme + "://" + r.Host
 }
 
 func isPlaylist(contentType, path string) bool {
