@@ -50,7 +50,11 @@ function loadScript() {
     document: { cookie: "buvid3=visible" },
     fetch: async (input, init) => {
       fetchCalls.push({ input, init });
-      return new RootResponse('{"data":{"url":"https://cdn.bilivideo.com/a.m4s"}}', {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes("/media-groups/")) {
+        return new RootResponse('{"ids":["0123456789abcdef0123456789abcdef"]}', {status: 200, headers: {"content-type": "application/json"}});
+      }
+      return new RootResponse('{"data":{"dash":{"video":[{"baseUrl":"https://cdn.bilivideo.com/a.m4s","backupUrl":["https://backup.bilivideo.com/a.m4s"]}]},"url":"https://cdn.bilivideo.com/a.m4s"}}', {
         headers: { "content-type": "application/json" },
       });
     },
@@ -103,6 +107,9 @@ test("routes playurl fetch through server with login cookie", async () => {
   const parsed = await response.json();
   assert.match(parsed.data.url, /^https:\/\/bili\.example\.com\/proxy\//);
   assert.match(parsed.data.url, /replace-with-the-same-token-as-the-server/);
+  assert.match(parsed.data.dash.video[0].baseUrl, /\/proxy-group\/replace-with-the-same-token-as-the-server\/0123456789abcdef0123456789abcdef\/0$/);
+  assert.match(parsed.data.dash.video[0].backupUrl[0], /\/proxy-group\/replace-with-the-same-token-as-the-server\/0123456789abcdef0123456789abcdef\/1$/);
+  assert.equal(fetchCalls.length, 2);
 });
 
 test("preserves Request options and leaves unrelated fetch responses alone", async () => {

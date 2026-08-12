@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bili CF Acc
 // @namespace    bili-cf-acc
-// @version      0.3.0
+// @version      0.4.0
 // @description  Route Bilibili playurl APIs and media through your fixed-egress proxy.
 // @match        https://www.bilibili.com/*
 // @match        https://live.bilibili.com/*
@@ -53,14 +53,61 @@
     return `${SERVER.replace(/\/$/, "")}/${route}/${encodeURIComponent(TOKEN)}/${base64url(url.origin)}${path}`;
   };
 
-  const rewrite = (value) => {
+  const collectMediaGroups = (value) => {
+    const groups = [];
     const seen = new WeakSet();
+    const visit = (current) => {
+      if (!current || typeof current !== "object" || seen.has(current)) return;
+      seen.add(current);
+      const primaryKey = ["baseUrl", "base_url", "url"].find((key) => typeof current[key] === "string" && isMediaUrl(current[key]));
+      const backupKey = ["backupUrl", "backup_url"].find((key) => Array.isArray(current[key]) && current[key].some((item) => typeof item === "string" && isMediaUrl(item)));
+      if (primaryKey || backupKey) {
+        const urls = [];
+        if (primaryKey) urls.push(current[primaryKey]);
+        if (backupKey) urls.push(...current[backupKey].filter((item) => typeof item === "string" && isMediaUrl(item)));
+        if (urls.length > 1) groups.push({owner: current, fields: [primaryKey, backupKey].filter(Boolean), urls});
+      }
+      for (const child of Object.values(current)) visit(child);
+    };
+    visit(value);
+    return groups;
+  };
+
+  const registerMediaGroups = async (groups) => {
+    if (groups.length === 0 || !nativeFetch) return [];
+    try {
+      const response = await nativeFetch(`${SERVER.replace(/\/$/, "")}/media-groups/${encodeURIComponent(TOKEN)}`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: root.JSON.stringify({groups: groups.map((group) => ({urls: group.urls}))}),
+        credentials: "omit",
+      });
+      if (!response.ok) return [];
+      const parsed = await response.json();
+      return Array.isArray(parsed.ids) && parsed.ids.length === groups.length ? parsed.ids.map(String) : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const rewrite = (value, registeredGroups = []) => {
+    const seen = new WeakSet();
+    const groupMap = new Map(registeredGroups.map((group) => [group.owner, group]));
     const visit = (current) => {
       if (!current || typeof current !== "object" || seen.has(current)) return current;
       seen.add(current);
 
+      const group = groupMap.get(current);
+      const groupedFields = new Set(group ? group.fields : []);
+      let preferred = 0;
       for (const [key, child] of Object.entries(current)) {
-        if (URL_KEYS.has(key) && typeof child === "string" && isMediaUrl(child)) {
+        if (groupedFields.has(key) && typeof child === "string" && isMediaUrl(child)) {
+          current[key] = `${SERVER.replace(/\/$/, "")}/proxy-group/${encodeURIComponent(TOKEN)}/${encodeURIComponent(group.id)}/${preferred++}`;
+        } else if (groupedFields.has(key) && Array.isArray(child)) {
+          current[key] = child.map((item) => (typeof item === "string" && isMediaUrl(item)
+            ? `${SERVER.replace(/\/$/, "")}/proxy-group/${encodeURIComponent(TOKEN)}/${encodeURIComponent(group.id)}/${preferred++}`
+            : item));
+        } else if (URL_KEYS.has(key) && typeof child === "string" && isMediaUrl(child)) {
           current[key] = proxyUrl(child);
         } else if (URL_KEYS.has(key) && Array.isArray(child)) {
           current[key] = child.map((item) => (typeof item === "string" && isMediaUrl(item) ? proxyUrl(item) : item));
@@ -76,6 +123,12 @@
   };
 
   const nativeParse = root.JSON.parse;
+  const rewriteAsync = async (value) => {
+    const groups = collectMediaGroups(value);
+    const ids = await registerMediaGroups(groups);
+    return rewrite(value, ids.map((id, index) => ({...groups[index], id})));
+  };
+
   const rewriteJSONText = (value) => {
     if (typeof value !== "string" || !MEDIA_URL_HINT.test(value)) return value;
     try {
@@ -184,14 +237,19 @@
   if (nativeJson) {
     root.Response.prototype.json = async function (...args) {
       const parsed = await nativeJson.apply(this, args);
-      return proxiedFetchResponses.has(this) ? rewrite(parsed) : parsed;
+      return proxiedFetchResponses.has(this) ? rewriteAsync(parsed) : parsed;
     };
   }
   const nativeText = root.Response?.prototype.text;
   if (nativeText) {
     root.Response.prototype.text = async function (...args) {
       const text = await nativeText.apply(this, args);
-      return proxiedFetchResponses.has(this) ? rewriteJSONText(text) : text;
+      if (!proxiedFetchResponses.has(this)) return text;
+      try {
+        return root.JSON.stringify(await rewriteAsync(nativeParse(text)));
+      } catch {
+        return rewriteJSONText(text);
+      }
     };
   }
 

@@ -347,14 +347,19 @@ test("response script rewrites media URLs without changing quality metadata", ()
       quality: 120,
       accept_quality: [127, 120, 80],
       dash: {
-        video: [{baseUrl: "https://cdn.bilivideo.com/video.m4s?deadline=1"}],
+        video: [{baseUrl: "https://cdn.bilivideo.com/video.m4s?deadline=1", backupUrl: ["https://backup.bilivideo.com/video.m4s?deadline=1"]}],
         audio: [{backupUrl: ["https://audio.bilivideo.com/audio.m4s"]}],
       },
       live: {host: "https://live.bilivideo.com"},
     },
   });
+  let registered;
   const result = runScript("bili-acc-response.js", {
     console: {log: (message) => logs.push(String(message))},
+    $httpClient: {post(options, callback) {
+      registered = JSON.parse(options.body);
+      callback(null, {status: 200}, JSON.stringify({ids: ["0123456789abcdef0123456789abcdef"]}));
+    }},
     $argument: "https://bili.example.com|test-token",
     $request: {url: "https://bili.example.com/playurl/test-token/origin/path", method: "GET", headers: {}},
     $response: {
@@ -374,7 +379,9 @@ test("response script rewrites media URLs without changing quality metadata", ()
   const parsed = JSON.parse(result.body);
   assert.equal(parsed.data.quality, 120);
   assert.deepEqual(parsed.data.accept_quality, [127, 120, 80]);
-  assert.match(parsed.data.dash.video[0].baseUrl, /^https:\/\/bili\.example\.com\/proxy\/test-token\//);
+  assert.deepEqual(registered.groups[0].urls, ["https://cdn.bilivideo.com/video.m4s?deadline=1", "https://backup.bilivideo.com/video.m4s?deadline=1"]);
+  assert.match(parsed.data.dash.video[0].baseUrl, /\/proxy-group\/test-token\/0123456789abcdef0123456789abcdef\/0$/);
+  assert.match(parsed.data.dash.video[0].backupUrl[0], /\/proxy-group\/test-token\/0123456789abcdef0123456789abcdef\/1$/);
   assert.match(parsed.data.dash.audio[0].backupUrl[0], /^https:\/\/bili\.example\.com\/proxy\/test-token\//);
   assert.match(parsed.data.live.host, /^https:\/\/bili\.example\.com\/proxy\/test-token\/[^/]+$/);
   assert.equal(result.headers["Content-Length"], undefined);
@@ -382,7 +389,7 @@ test("response script rewrites media URLs without changing quality metadata", ()
   assert.equal(result.headers["Content-MD5"], undefined);
   assert.equal(result.headers.Digest, undefined);
   assert.equal(result.headers.ETag, undefined);
-  assert.deepEqual(logs, ["[Bili Acc][response] rewrite status=200 source=proxied_api media_urls=3"]);
+  assert.deepEqual(logs, ["[Bili Acc][response] rewrite status=200 source=proxied_api media_urls=4 fallback_groups=1"]);
   assert.doesNotMatch(logs[0], /test-token|deadline=/);
 });
 

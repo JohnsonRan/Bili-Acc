@@ -269,7 +269,7 @@ const TOKEN = "replace-with-the-same-token-as-the-server";
 3. 授权 `GM_cookie`，以读取包括 HttpOnly 在内的 B 站登录 Cookie。
 4. 刷新 B 站页面并开始播放。
 
-脚本会在 `document-start` 阶段拦截网页端 GET playurl 请求，将 Cookie 放入 `X-Bili-Cookie`，并改写 fetch JSON/text、XHR response/responseText 以及页面初始 `__playinfo__`/直播状态中的媒体 URL，避免首次打开后必须切换清晰度才生效。Cookie 在脚本内缓存 15 秒，不会由服务端持久化。
+脚本会在 `document-start` 阶段拦截网页端 GET playurl 请求，将 Cookie 放入 `X-Bili-Cookie`，并改写 fetch JSON/text、XHR response/responseText 以及页面初始 `__playinfo__`/直播状态中的媒体 URL，避免首次打开后必须切换清晰度才生效。可异步等待的 fetch JSON/text 会把同一 DASH 项的主/备用签名 URL 注册为后端 fallback 组；同步 XHR getter 和页面初始变量无法等待注册，因此继续使用逐 URL `/proxy/`，由播放器自身执行备用切换。Cookie 在脚本内缓存 15 秒，不会由服务端持久化。
 
 ### Surge
 

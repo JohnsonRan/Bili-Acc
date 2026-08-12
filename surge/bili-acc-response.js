@@ -41,14 +41,64 @@
     return;
   }
 
-  let rewrittenURLs = 0;
-  rewrite(payload);
-  const headers = {...$response.headers};
-  for (const name of ["content-length", "content-encoding", "content-md5", "digest", "etag", "last-modified"]) {
-    deleteHeader(headers, name);
+  const groups = collectMediaGroups(payload);
+  if (groups.length > 0 && typeof $httpClient !== "undefined" && typeof $httpClient.post === "function") {
+    $httpClient.post({url: `${server}/media-groups/${encodeURIComponent(token)}`, headers: {"Content-Type": "application/json"}, body: JSON.stringify({groups: groups.map((group) => ({urls: group.urls}))})}, (error, response, responseBody) => {
+      let ids = [];
+      if (!error && Number(response && response.status) >= 200 && Number(response && response.status) < 300) {
+        try {
+          const parsed = JSON.parse(responseBody || "{}");
+          if (Array.isArray(parsed.ids) && parsed.ids.length === groups.length) ids = parsed.ids.map(String);
+        } catch (_) {}
+      }
+      finish(ids);
+    });
+    return;
   }
-  log(`rewrite status=${String($response.status || "unknown")} source=${requestKind} media_urls=${rewrittenURLs}`);
-  $done({body: JSON.stringify(payload), headers});
+  finish([]);
+
+  function finish(groupIDs) {
+    let rewrittenURLs = 0;
+    rewrite(payload, new Map(groups.map((group, index) => [group.owner, {id: groupIDs[index] || "", fields: group.fields}])));
+    const headers = {...$response.headers};
+    for (const name of ["content-length", "content-encoding", "content-md5", "digest", "etag", "last-modified"]) deleteHeader(headers, name);
+    log(`rewrite status=${String($response.status || "unknown")} source=${requestKind} media_urls=${rewrittenURLs} fallback_groups=${groupIDs.length}`);
+    $done({body: JSON.stringify(payload), headers});
+
+    function rewrite(value, groupMap) {
+      if (!value || typeof value !== "object") return;
+      const group = groupMap.get(value);
+      const groupedFields = new Set(group ? group.fields : []);
+      let candidateIndex = 0;
+      for (const [key, child] of Object.entries(value)) {
+        if (groupedFields.has(key) && typeof child === "string" && isMediaURL(child)) {
+          value[key] = group.id ? proxyGroupURL(group.id, candidateIndex++) : proxyURL(child);
+          rewrittenURLs++;
+        } else if (groupedFields.has(key) && Array.isArray(child)) {
+          value[key] = child.map((item) => {
+            if (typeof item !== "string" || !isMediaURL(item)) return item;
+            const rewritten = group.id ? proxyGroupURL(group.id, candidateIndex++) : proxyURL(item);
+            rewrittenURLs++;
+            return rewritten;
+          });
+        } else if (URL_KEYS.has(key) && typeof child === "string" && isMediaURL(child)) {
+          value[key] = proxyURL(child);
+          rewrittenURLs++;
+        } else if (URL_KEYS.has(key) && Array.isArray(child)) {
+          value[key] = child.map((item) => {
+            if (typeof item !== "string" || !isMediaURL(item)) return item;
+            rewrittenURLs++;
+            return proxyURL(item);
+          });
+        } else if (key === "host" && typeof child === "string" && isMediaURL(child)) {
+          value[key] = proxyURL(child, true);
+          rewrittenURLs++;
+        } else {
+          rewrite(child, groupMap);
+        }
+      }
+    }
+  }
 
   function log(message) {
     console.log(`[Bili Acc][response] ${message}`);
@@ -58,25 +108,24 @@
     return error && error.name ? String(error.name) : "Error";
   }
 
-  function rewrite(value) {
-    if (!value || typeof value !== "object") return;
-    for (const [key, child] of Object.entries(value)) {
-      if (URL_KEYS.has(key) && typeof child === "string" && isMediaURL(child)) {
-        value[key] = proxyURL(child);
-        rewrittenURLs++;
-      } else if (URL_KEYS.has(key) && Array.isArray(child)) {
-        value[key] = child.map((item) => {
-          if (typeof item !== "string" || !isMediaURL(item)) return item;
-          rewrittenURLs++;
-          return proxyURL(item);
-        });
-      } else if (key === "host" && typeof child === "string" && isMediaURL(child)) {
-        value[key] = proxyURL(child, true);
-        rewrittenURLs++;
-      } else {
-        rewrite(child);
+  function collectMediaGroups(value) {
+    const groups = [];
+    const seen = new WeakSet();
+    const visit = (current) => {
+      if (!current || typeof current !== "object" || seen.has(current)) return;
+      seen.add(current);
+      const primaryKey = ["baseUrl", "base_url", "url"].find((key) => typeof current[key] === "string" && isMediaURL(current[key]));
+      const backupKey = ["backupUrl", "backup_url"].find((key) => Array.isArray(current[key]) && current[key].some((item) => typeof item === "string" && isMediaURL(item)));
+      if (primaryKey || backupKey) {
+        const urls = [];
+        if (primaryKey) urls.push(current[primaryKey]);
+        if (backupKey) urls.push(...current[backupKey].filter((item) => typeof item === "string" && isMediaURL(item)));
+        if (urls.length > 1) groups.push({owner: current, fields: [primaryKey, backupKey].filter(Boolean), urls});
       }
-    }
+      for (const child of Object.values(current)) visit(child);
+    };
+    visit(value);
+    return groups;
   }
 
   function isMediaURL(value) {
@@ -84,6 +133,10 @@
     if (!match) return false;
     const hostname = match[1].toLowerCase();
     return MEDIA_HOSTS.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+  }
+
+  function proxyGroupURL(id, preferred) {
+    return `${server}/proxy-group/${encodeURIComponent(token)}/${encodeURIComponent(id)}/${preferred}`;
   }
 
   function proxyURL(value, originOnly = false) {
