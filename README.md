@@ -292,7 +292,7 @@ Surge 还需要：
 
 网页端请求仍通过 `/playurl/` 响应改写。原生 App 的 `Player/PlayViewUnite` POST 请求会先改写到 Bili-Acc `/playurl-grpc/`，让 B 站按 VPS 出口生成媒体签名；随后 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求改写为 `/proxy/` 地址，并保留 `Range` 等流式请求头。
 
-为避免对共享 CDN `*.akamaized.net` 做全域 MITM，模块只 MITM `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的 `Player/PlayViewUnite` 原生播放请求与响应。请求脚本以 binary body mode 保存 protobuf 请求体，通过普通二进制 HTTP 隧道转发到 VPS，并声明 `grpc-accept-encoding: identity`。响应脚本按已知 protobuf 字段结构处理 `DashVideo`/`ResponseUrl`，发现 Akamai 主地址时将该媒体项的主地址和全部备用地址统一替换为同一个 Bili-Acc `/proxy/` Akamai URL，避免 App 回退到按客户端 IP 签发的 B 站备用 CDN；如果上游仍返回 gzip message frame，脚本会先解压、改写并重新输出未压缩 frame。未知压缩算法或没有 B 站备用地址时保持原样。主模块完全不声明 `akamaized.net` MITM。
+为避免对共享 CDN `*.akamaized.net` 做全域 MITM，模块只 MITM `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的 `Player/PlayViewUnite` 原生播放请求与响应。请求脚本以 binary body mode 保存 protobuf 请求体，通过普通二进制 HTTP 隧道转发到 VPS，并声明 `grpc-accept-encoding: identity`。响应脚本按 PlayerUnite protobuf 字段结构处理视频、普通音频、Dolby、无损音频和分段流 URL，并参考 BiliUniverse Redirect 的 OverseaVideo 兼容分组，将海外 COS/Huawei/Ali/AWS/Akamai 地址统一规范到 Ali CDN 后包装为 Bili-Acc `/proxy/` URL；如果上游仍返回 gzip message frame，脚本会先解压、改写并重新输出未压缩 frame。未知压缩算法或没有 B 站备用地址时保持原样。主模块完全不声明 `akamaized.net` MITM。
 
 若模块没有生效，在 Surge 的脚本日志或请求备注中搜索 `[Bili Acc]`；模块已启用 `debug=true`，因此命中脚本的 `console.log()` 会同时写入请求备注。更新模块后应确认请求日志包含 `tunnel=http`；如果仍只有 `compression=identity`，说明 Surge 仍在使用旧版远程脚本，应删除旧模块后从原始模块 URL 重新安装。模块的 `script-path` 带版本参数，用于在发布修复时绕过 Surge 的远程脚本缓存。一次正常的点播请求至少应看到：
 
@@ -304,7 +304,7 @@ Surge 还需要：
 [Bili Acc][media-request] rewrite media_host=upos.example.bilivideo.com method=GET range=true
 ```
 
-网页端的 `media_urls` 会随响应内容变化；为 `0` 表示响应脚本执行了，但没有找到受支持的媒体 URL。原生 App 通常会出现 `[grpc-response]` 和/或 `[media-request] rewrite`；`akamai_urls=0` 表示响应内没有需要包装到 `/proxy/` 的 Akamai 主地址，`decompressed_frames` 表示脚本处理的 gzip gRPC message 数量。请求方法不支持、媒体域名不匹配或响应与当前代理地址无关等正常放行情况不会打印日志；保留的 `skip reason=...` 仅用于说明参数无效、响应体为空、压缩/无效 protobuf 或 JSON 无法解析等需要排查的情况。日志只记录 API/媒体主机、无查询参数的 API 路径、状态和计数，不记录 server、Token、Cookie、完整媒体 URL 或查询参数。如果出现 `unsupported_content_type type=text/html`，说明 `/playurl-grpc/` 没有返回后端 gRPC 数据；应确认服务端和 Surge 模块均已更新到支持 binary HTTP tunnel 的版本，并检查 Caddy/CDN 是否将该路径改写成错误页。如果完全没有 `[Bili Acc]` 日志，说明请求脚本没有运行，或者请求被正常放行；需要排查时优先检查模块和 MITM 是否启用、Surge CA 是否已信任、实际请求是否命中模块声明的域名，以及是否有其他模块中更靠前的同类型脚本先匹配了该请求（Surge 对每个请求只运行首个匹配脚本）。
+网页端的 `media_urls` 会随响应内容变化；为 `0` 表示响应脚本执行了，但没有找到受支持的媒体 URL。原生 App 通常会出现 `[grpc-response]` 和/或 `[media-request] rewrite`；`akamai_urls=0` 表示响应内没有需要规范并包装到 `/proxy/` 的海外媒体地址，`decompressed_frames` 表示脚本处理的 gzip gRPC message 数量。请求方法不支持、媒体域名不匹配或响应与当前代理地址无关等正常放行情况不会打印日志；保留的 `skip reason=...` 仅用于说明参数无效、响应体为空、压缩/无效 protobuf 或 JSON 无法解析等需要排查的情况。日志只记录 API/媒体主机、无查询参数的 API 路径、状态和计数，不记录 server、Token、Cookie、完整媒体 URL 或查询参数。如果出现 `unsupported_content_type type=text/html`，说明 `/playurl-grpc/` 没有返回后端 gRPC 数据；应确认服务端和 Surge 模块均已更新到支持 binary HTTP tunnel 的版本，并检查 Caddy/CDN 是否将该路径改写成错误页。如果完全没有 `[Bili Acc]` 日志，说明请求脚本没有运行，或者请求被正常放行；需要排查时优先检查模块和 MITM 是否启用、Surge CA 是否已信任、实际请求是否命中模块声明的域名，以及是否有其他模块中更靠前的同类型脚本先匹配了该请求（Surge 对每个请求只运行首个匹配脚本）。
 
 ## 安全与运行行为
 

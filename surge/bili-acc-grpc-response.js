@@ -1,7 +1,14 @@
 (() => {
   "use strict";
 
-  const AKAMAI_SUFFIX = "akamaized.net";
+  const OVERSEA_MEDIA_HOSTS = new Set([
+    "upos-hz-mirrorakam.akamaized.net",
+    "upos-sz-mirrorawsov.bilivideo.com",
+    "upos-sz-mirroraliov.bilivideo.com",
+    "upos-sz-mirrorcosov.bilivideo.com",
+    "upos-sz-mirrorhwov.bilivideo.com",
+  ]);
+  const OVERSEA_TARGET_HOST = "upos-sz-mirrorali.bilivideo.com";
   const argument = String($argument || "");
   const separator = argument.indexOf("|");
   const configuredServer = separator >= 0 ? argument.slice(0, separator) : "";
@@ -9,14 +16,17 @@
   const server = configuredServer.replace(/\/$/, "");
   const SCHEMAS = {
     PlayViewUniteReply: {1: "VodInfo", 10: "FragmentVideo"},
-    VodInfo: {5: "Stream"},
+    VodInfo: {5: "Stream", 6: "DashItem", 7: "DolbyItem", 9: "LossLessItem"},
     Stream: {2: "DashVideo", 3: "SegmentVideo"},
     SegmentVideo: {1: "ResponseUrl"},
+    DolbyItem: {2: "DashItem"},
+    LossLessItem: {2: "DashItem"},
     FragmentVideo: {1: "FragmentVideoInfo"},
     FragmentVideoInfo: {2: "VodInfo"},
   };
   const URL_LAYOUTS = {
     DashVideo: {primary: 1, backup: 2},
+    DashItem: {primary: 2, backup: 3},
     ResponseUrl: {primary: 4, backup: 5},
   };
 
@@ -152,9 +162,9 @@
 
     const layout = URL_LAYOUTS[type];
     if (layout) {
-      const primaryField = fields.find((field) => field.number === layout.primary && field.wireType === 2 && isAkamaiURL(asciiURL(field.payload)));
+      const primaryField = fields.find((field) => field.number === layout.primary && field.wireType === 2 && isOverseaMediaURL(asciiURL(field.payload)));
       if (primaryField) {
-        const proxiedPrimary = asciiBytes(proxyURL(asciiURL(primaryField.payload)));
+        const proxiedPrimary = asciiBytes(proxyURL(normalizeOverseaURL(asciiURL(primaryField.payload))));
         for (const field of fields) {
           if ((field.number !== layout.primary && field.number !== layout.backup) || field.wireType !== 2) continue;
           field.payload = proxiedPrimary;
@@ -275,9 +285,12 @@
     return match ? match[1].toLowerCase() : "";
   }
 
-  function isAkamaiURL(value) {
-    const hostname = hostnameOf(value);
-    return hostname === AKAMAI_SUFFIX || hostname.endsWith(`.${AKAMAI_SUFFIX}`);
+  function isOverseaMediaURL(value) {
+    return OVERSEA_MEDIA_HOSTS.has(hostnameOf(value));
+  }
+
+  function normalizeOverseaURL(value) {
+    return String(value).replace(/^(https?:\/\/)[^/:?#]+/i, `$1${OVERSEA_TARGET_HOST}`);
   }
 
   function proxyURL(value) {
