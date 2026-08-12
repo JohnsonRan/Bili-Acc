@@ -165,7 +165,7 @@ test("gRPC request routes playurl through the fixed-egress server", () => {
   assert.doesNotMatch(logs[0], /test-token|PlayViewUnite/);
 });
 
-test("gRPC response replaces Akamai URLs with Bilibili backup URLs", () => {
+test("gRPC response pins Akamai media URLs through the proxy", () => {
   const akamai = "https://video.example.akamaized.net/upgcxcode/video.m4s?deadline=secret";
   const backup = "https://upos-sz-mirrorali.bilivideo.com/upgcxcode/video.m4s?deadline=secret";
   const dashVideo = Buffer.concat([protobufBytesField(1, akamai), protobufBytesField(2, backup)]);
@@ -190,7 +190,7 @@ test("gRPC response replaces Akamai URLs with Bilibili backup URLs", () => {
   const rewritten = Buffer.from(result.body).toString("latin1");
   assert.doesNotMatch(rewritten, /video\.example\.akamaized\.net/);
   assert.match(rewritten, /https:\/\/bili\.example\.com\/proxy\/test-token\/aHR0cHM6Ly92aWRlby5leGFtcGxlLmFrYW1haXplZC5uZXQ\/upgcxcode\/video\.m4s/);
-  assert.match(rewritten, /upos-sz-mirrorali\.bilivideo\.com/);
+  assert.doesNotMatch(rewritten, /upos-sz-mirrorali\.bilivideo\.com/);
   assert.equal(result.headers["Content-Length"], undefined);
   assert.equal(result.headers["X-Bili-Acc-Grpc-Status"], undefined);
   assert.equal(result.headers["Grpc-Status"], "0");
@@ -198,7 +198,7 @@ test("gRPC response replaces Akamai URLs with Bilibili backup URLs", () => {
   assert.doesNotMatch(logs[0], /test-token|aHR0|deadline=|video\.m4s/);
 });
 
-test("gRPC response proxies Akamai primary and preserves backup URLs", () => {
+test("gRPC response pins Akamai primary and backups to the same proxy URL", () => {
   const akamai = "https://video.example.akamaized.net/main.m4s";
   const preferred = "https://upos-sz-mirrorali.bilivideo.com/preferred.m4s";
   const later = "https://upos-sz-mirrorcosov.bilivideo.com/later.m4s";
@@ -213,9 +213,9 @@ test("gRPC response proxies Akamai primary and preserves backup URLs", () => {
     $response: {headers: {"Content-Type": "application/grpc"}, body: grpcFrame(reply)},
   });
   const rewritten = Buffer.from(result.body).toString("latin1");
-  assert.match(rewritten, /https:\/\/bili\.example\.com\/proxy\/test-token\/aHR0cHM6Ly92aWRlby5leGFtcGxlLmFrYW1haXplZC5uZXQ\/main\.m4s/);
-  assert.equal(rewritten.match(/upos-sz-mirrorali\.bilivideo\.com\/preferred\.m4s/g)?.length, 1);
-  assert.equal(rewritten.match(/upos-sz-mirrorcosov\.bilivideo\.com\/later\.m4s/g)?.length, 1);
+  const proxied = /https:\/\/bili\.example\.com\/proxy\/test-token\/aHR0cHM6Ly92aWRlby5leGFtcGxlLmFrYW1haXplZC5uZXQ\/main\.m4s/g;
+  assert.equal(rewritten.match(proxied)?.length, 3);
+  assert.doesNotMatch(rewritten, /upos-sz-mirrorali|upos-sz-mirrorcosov/);
 });
 
 test("gRPC response restores tunneled status even without URL rewrites", () => {
@@ -285,8 +285,9 @@ test("gRPC response decompresses gzip frames before rewriting", () => {
   });
   const rewritten = Buffer.from(result.body);
   assert.equal(rewritten[0], 0);
-  assert.doesNotMatch(rewritten.toString("latin1"), /akamaized\.net/);
-  assert.match(rewritten.toString("latin1"), /cdn\.bilivideo\.com/);
+  assert.doesNotMatch(rewritten.toString("latin1"), /video\.example\.akamaized\.net/);
+  assert.equal(rewritten.toString("latin1").match(/https:\/\/bili\.example\.com\/proxy\/test-token\/aHR0cHM6Ly92aWRlby5leGFtcGxlLmFrYW1haXplZC5uZXQ\/main\.m4s/g)?.length, 2);
+  assert.doesNotMatch(rewritten.toString("latin1"), /cdn\.bilivideo\.com/);
   assert.equal(result.headers["grpc-encoding"], undefined);
   assert.equal(result.headers["Content-Encoding"], undefined);
   assert.deepEqual(logs, ["[Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 akamai_urls=1 decompressed_frames=1"]);

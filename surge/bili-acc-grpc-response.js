@@ -152,13 +152,15 @@
 
     const layout = URL_LAYOUTS[type];
     if (layout) {
-      for (const field of fields) {
-        if (field.number !== layout.primary || field.wireType !== 2) continue;
-        const primary = asciiURL(field.payload);
-        if (!isAkamaiURL(primary)) continue;
-        field.payload = asciiBytes(proxyURL(primary));
-        field.changed = true;
-        changed = true;
+      const primaryField = fields.find((field) => field.number === layout.primary && field.wireType === 2 && isAkamaiURL(asciiURL(field.payload)));
+      if (primaryField) {
+        const proxiedPrimary = asciiBytes(proxyURL(asciiURL(primaryField.payload)));
+        for (const field of fields) {
+          if ((field.number !== layout.primary && field.number !== layout.backup) || field.wireType !== 2) continue;
+          field.payload = proxiedPrimary;
+          field.changed = true;
+          changed = true;
+        }
         rewritten++;
       }
     }
