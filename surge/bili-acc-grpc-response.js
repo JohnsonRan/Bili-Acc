@@ -146,7 +146,7 @@
         .filter((field) => field.number === layout.backup && field.wireType === 2)
         .map((field) => asciiURL(field.payload))
         .filter((url) => isBiliMediaURL(url));
-      const fallback = fallbackURLs[fallbackURLs.length - 1];
+      const fallback = fallbackURLs[0];
       if (fallback) {
         for (const field of fields) {
           if (field.number !== layout.primary || field.wireType !== 2 || !isAkamaiURL(asciiURL(field.payload))) continue;

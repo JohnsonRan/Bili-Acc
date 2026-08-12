@@ -196,6 +196,25 @@ test("gRPC response replaces Akamai URLs with Bilibili backup URLs", () => {
   assert.doesNotMatch(logs[0], /test-token|aHR0|deadline=|video\.m4s/);
 });
 
+test("gRPC response preserves upstream backup priority when replacing Akamai", () => {
+  const akamai = "https://video.example.akamaized.net/main.m4s";
+  const preferred = "https://upos-sz-mirrorali.bilivideo.com/preferred.m4s";
+  const later = "https://upos-sz-mirrorcosov.bilivideo.com/later.m4s";
+  const dashVideo = Buffer.concat([
+    protobufBytesField(1, akamai),
+    protobufBytesField(2, preferred),
+    protobufBytesField(2, later),
+  ]);
+  const reply = protobufBytesField(1, protobufBytesField(5, protobufBytesField(2, dashVideo)));
+  const result = runScript("bili-acc-grpc-response.js", {
+    $request: {url: "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite", headers: {}},
+    $response: {headers: {"Content-Type": "application/grpc"}, body: grpcFrame(reply)},
+  });
+  const rewritten = Buffer.from(result.body).toString("latin1");
+  assert.match(rewritten, /upos-sz-mirrorali\.bilivideo\.com\/preferred\.m4s/);
+  assert.equal(rewritten.match(/upos-sz-mirrorcosov\.bilivideo\.com\/later\.m4s/g)?.length, 1);
+});
+
 test("gRPC response restores tunneled status even without URL rewrites", () => {
   const dashVideo = protobufBytesField(1, "https://cdn.bilivideo.com/main.m4s");
   const reply = protobufBytesField(1, protobufBytesField(5, protobufBytesField(2, dashVideo)));
@@ -400,6 +419,7 @@ test("module declares native gRPC rewriting and scoped MITM hosts", () => {
   for (const line of scriptLines) {
     const pattern = line.match(/pattern=(.*),script-path=/)?.[1];
     assert.doesNotThrow(() => new RegExp(pattern));
+    assert.match(line, /script-path=https:\/\/raw\.githubusercontent\.com\/JohnsonRan\/Bili-Acc\/main\/surge\/[^,]+\.js\?v=\d{8}-\d+,/);
   }
   const requestLine = scriptLines.find((line) => line.includes("bili-acc-request.js"));
   const requestPattern = new RegExp(requestLine.match(/pattern=(.*),script-path=/)[1]);
