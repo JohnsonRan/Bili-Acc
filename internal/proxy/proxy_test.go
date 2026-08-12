@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,10 +24,114 @@ import (
 
 const testToken = "test-token"
 
+func encodeTestVarint(value uint64) []byte {
+	output := []byte{}
+	for {
+		current := byte(value & 0x7f)
+		value >>= 7
+		if value != 0 {
+			current |= 0x80
+		}
+		output = append(output, current)
+		if value == 0 {
+			return output
+		}
+	}
+}
+
+func protobufBytesField(number uint64, value []byte) []byte {
+	output := append(encodeTestVarint(number<<3|2), encodeTestVarint(uint64(len(value)))...)
+	return append(output, value...)
+}
+
+func grpcRequestFrame(payload []byte, compressed bool) []byte {
+	framedPayload := payload
+	flag := byte(0)
+	if compressed {
+		var buffer bytes.Buffer
+		writer := gzip.NewWriter(&buffer)
+		_, _ = writer.Write(payload)
+		_ = writer.Close()
+		framedPayload = buffer.Bytes()
+		flag = 1
+	}
+	output := make([]byte, 5+len(framedPayload))
+	output[0] = flag
+	binary.BigEndian.PutUint32(output[1:5], uint32(len(framedPayload)))
+	copy(output[5:], framedPayload)
+	return output
+}
+
 func proxyPath(prefix, token, target string) string {
 	u, _ := url.Parse(target)
 	origin := u.Scheme + "://" + u.Host
 	return prefix + token + "/" + base64.RawURLEncoding.EncodeToString([]byte(origin)) + u.RequestURI()
+}
+
+func TestNormalizePlayViewUniteRequestRemovesAdExtraAndPreservesUnknownFields(t *testing.T) {
+	vod := append([]byte{0x08, 0x7b}, protobufBytesField(99, []byte("unknown-vod"))...)
+	payload := append(protobufBytesField(1, vod), protobufBytesField(playViewUniteAdExtraField, []byte("client-ad-context"))...)
+	payload = append(payload, protobufBytesField(99, []byte("unknown-request"))...)
+	framed := grpcRequestFrame(payload, false)
+
+	normalized, changed := normalizePlayViewUniteRequest(framed, "")
+	if !changed || normalized[0] != 0 {
+		t.Fatalf("changed=%v flag=%d", changed, normalized[0])
+	}
+	if bytes.Contains(normalized, []byte("client-ad-context")) {
+		t.Fatal("ad_extra was retained")
+	}
+	for _, expected := range [][]byte{vod, []byte("unknown-vod"), []byte("unknown-request")} {
+		if !bytes.Contains(normalized, expected) {
+			t.Fatalf("missing preserved bytes %q", expected)
+		}
+	}
+	if got := int(binary.BigEndian.Uint32(normalized[1:5])); got != len(normalized)-5 {
+		t.Fatalf("frame length=%d body=%d", got, len(normalized)-5)
+	}
+}
+
+func TestNormalizePlayViewUniteRequestPreservesCapturedRequestFields(t *testing.T) {
+	expected, err := os.ReadFile("testdata/playviewunite-no-ad-extra.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := append([]byte(nil), expected[5:]...)
+	payload = append(payload, protobufBytesField(playViewUniteAdExtraField, bytes.Repeat([]byte("A"), 2272))...)
+	normalized, changed := normalizePlayViewUniteRequest(grpcRequestFrame(payload, true), "gzip")
+	if !changed || !bytes.Equal(normalized, expected) {
+		t.Fatalf("changed=%v normalized=%x want=%x", changed, normalized, expected)
+	}
+}
+
+func TestNormalizePlayViewUniteRequestDecompressesGzipFrame(t *testing.T) {
+	payload := append(protobufBytesField(5, []byte("BV1")), protobufBytesField(playViewUniteAdExtraField, []byte("client-ad-context"))...)
+	framed := grpcRequestFrame(payload, true)
+	normalized, changed := normalizePlayViewUniteRequest(framed, "gzip")
+	if !changed || normalized[0] != 0 || bytes.Contains(normalized, []byte("client-ad-context")) || !bytes.Contains(normalized, []byte("BV1")) {
+		t.Fatalf("changed=%v flag=%d body=%x", changed, normalized[0], normalized)
+	}
+}
+
+func TestNormalizePlayViewUniteRequestFallsBackOnUnsupportedFrames(t *testing.T) {
+	compressed := grpcRequestFrame(protobufBytesField(playViewUniteAdExtraField, []byte("ad")), true)
+	reservedCompressed := append([]byte(nil), compressed...)
+	reservedCompressed[0] = 3
+	reservedIdentity := grpcRequestFrame(protobufBytesField(playViewUniteAdExtraField, []byte("ad")), false)
+	reservedIdentity[0] = 2
+	cases := [][]byte{
+		{0, 0, 0, 0, 2, 8},
+		compressed,
+		reservedCompressed,
+		reservedIdentity,
+		append(grpcRequestFrame(protobufBytesField(playViewUniteAdExtraField, []byte("ad")), false), 0),
+	}
+	for index, body := range cases {
+		normalized, changed := normalizePlayViewUniteRequest(body, "br")
+		if changed || !bytes.Equal(normalized, body) {
+			t.Fatalf("case=%d changed=%v", index, changed)
+		}
+	}
 }
 
 func TestMediaGroupRetriesConnectionErrorsAndUpstream5xx(t *testing.T) {
@@ -63,12 +170,15 @@ func TestMediaGroupRetriesConnectionErrorsAndUpstream5xx(t *testing.T) {
 	}
 }
 
-func TestMediaGroupDoesNotRetryUpstream403(t *testing.T) {
+func TestMediaGroupRetriesUpstream403(t *testing.T) {
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
-	attempts := 0
+	attempts := []string{}
 	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		attempts++
-		return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("forbidden")), Request: request}, nil
+		attempts = append(attempts, request.URL.Host)
+		if request.URL.Host == "first.bilivideo.com" {
+			return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("forbidden")), Request: request}, nil
+		}
+		return &http.Response{StatusCode: http.StatusPartialContent, Header: http.Header{"Content-Type": {"video/mp4"}}, Body: io.NopCloser(strings.NewReader("ok")), Request: request}, nil
 	})
 	registration := `{"groups":[{"urls":["https://first.bilivideo.com/video.m4s","https://second.bilivideo.com/video.m4s"]}]}`
 	registerResponse := httptest.NewRecorder()
@@ -77,8 +187,11 @@ func TestMediaGroupDoesNotRetryUpstream403(t *testing.T) {
 	_ = json.Unmarshal(registerResponse.Body.Bytes(), &registered)
 	response := httptest.NewRecorder()
 	app.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/proxy-group/"+testToken+"/"+registered.IDs[0]+"/0", nil))
-	if response.Code != http.StatusForbidden || attempts != 1 {
-		t.Fatalf("response=%d attempts=%d", response.Code, attempts)
+	if response.Code != http.StatusPartialContent || response.Body.String() != "ok" {
+		t.Fatalf("response=%d body=%q", response.Code, response.Body.String())
+	}
+	if got := strings.Join(attempts, ","); got != "first.bilivideo.com,second.bilivideo.com" {
+		t.Fatalf("attempts=%q", got)
 	}
 }
 
@@ -137,7 +250,9 @@ func TestPlayurlProxyForwardsCookie(t *testing.T) {
 }
 
 func TestGRPCPlayurlProxyForwardsPOSTBodyMetadataAndTrailers(t *testing.T) {
-	requestBody := []byte{0, 0, 0, 0, 2, 8, 1}
+	requestPayload := append(protobufBytesField(5, []byte("BV1")), protobufBytesField(playViewUniteAdExtraField, []byte("client-ad-context"))...)
+	requestBody := grpcRequestFrame(requestPayload, true)
+	expectedUpstreamBody := grpcRequestFrame(protobufBytesField(5, []byte("BV1")), false)
 	responseBody := []byte{0, 0, 0, 0, 2, 8, 2}
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ProtoMajor != 2 {
@@ -150,8 +265,11 @@ func TestGRPCPlayurlProxyForwardsPOSTBodyMetadataAndTrailers(t *testing.T) {
 			t.Fatalf("target = %q%q", r.Host, r.URL.Path)
 		}
 		body, err := io.ReadAll(r.Body)
-		if err != nil || !bytes.Equal(body, requestBody) {
-			t.Fatalf("body = %v err=%v", body, err)
+		if err != nil || !bytes.Equal(body, expectedUpstreamBody) {
+			t.Fatalf("body = %x want %x err=%v", body, expectedUpstreamBody, err)
+		}
+		if got := r.Header.Get("Grpc-Encoding"); got != "" {
+			t.Fatalf("Grpc-Encoding = %q", got)
 		}
 		if got := r.Header.Get("Content-Type"); got != "application/grpc+proto" {
 			t.Fatalf("Content-Type = %q", got)
@@ -191,6 +309,7 @@ func TestGRPCPlayurlProxyForwardsPOSTBodyMetadataAndTrailers(t *testing.T) {
 	request.Header.Set("Content-Type", grpcTunnelContentType)
 	request.Header.Set(grpcOriginalContentTypeHdr, "application/grpc+proto")
 	request.Header.Set("Grpc-Accept-Encoding", "gzip,identity")
+	request.Header.Set("Grpc-Encoding", "gzip")
 	request.Header.Set("Authorization", "identify_v1 secret")
 	request.Header.Set("X-Bili-Device", "device-metadata")
 	request.Header.Set("X-Bili-Cookie", "must-not-forward")

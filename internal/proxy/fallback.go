@@ -203,7 +203,7 @@ func cloneURL(value *url.URL) *url.URL {
 }
 
 func retryableMediaStatus(status int) bool {
-	return status == http.StatusRequestTimeout || status == http.StatusTooEarly || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+	return status == http.StatusForbidden || status == http.StatusRequestTimeout || status == http.StatusTooEarly || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 }
 
 func (s *server) fetchMediaCandidates(ctx context.Context, method string, candidates []*url.URL, headers http.Header) (*http.Response, *url.URL, error) {

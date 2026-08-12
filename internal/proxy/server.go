@@ -327,6 +327,10 @@ func (s *server) handleGRPCPlayurl(w http.ResponseWriter, r *http.Request) {
 
 	headers := copyGRPCRequestHeaders(r.Header)
 	normalizeGRPCMetadata(headers)
+	body, requestNormalized := normalizePlayViewUniteRequest(body, headers.Get("Grpc-Encoding"))
+	if requestNormalized {
+		headers.Del("Grpc-Encoding")
+	}
 	headers.Del(grpcOriginalContentTypeHdr)
 	headers.Set("Content-Type", upstreamContentType)
 	headers.Set("Accept-Encoding", "identity")

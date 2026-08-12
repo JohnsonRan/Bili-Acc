@@ -180,7 +180,7 @@ https://api.bilibili.com/x/player/wbi/playurl?bvid=...&cid=...
 POST /playurl-grpc/{token}/{base64url(origin)}/bilibili.app.playerunite.v1.Player/PlayViewUnite
 ```
 
-该路由只允许 `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的上述精确方法，完整转发最多 2 MiB 的 protobuf 请求体及必要的 gRPC metadata，并强制上游使用 `grpc-accept-encoding: identity`。Surge 到 Bili-Acc 的外层请求使用 `application/x-bili-acc-grpc` 普通二进制 HTTP 隧道，后端再恢复为上游 `application/grpc`，避免 Cloudflare/Caddy 将该请求误判为需要端到端 HTTP/2 gRPC 的连接并返回 HTML 错误页。响应体最多缓冲 8 MiB，以便在读取上游 trailer 后同时保留真实 gRPC trailer，并通过内部普通响应头镜像经过校验的 `grpc-status`；Surge 会移除内部头并恢复 `Grpc-Status`，因此外层 CDN 即使不保留普通 HTTP trailer，也不会丢失 RPC 状态。其他主机、路径或 HTTP 方法不会转发。
+该路由只允许 `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的上述精确方法，接收最多 2 MiB 的 protobuf 请求体及必要的 gRPC metadata。后端会解析单条 `PlayViewUniteReq` gRPC frame；若请求使用 gzip message compression，会先有界解压，并在保持其他 protobuf 请求字段原始字节不变的前提下移除客户端生成的 `ad_extra` 上下文，再以未压缩 frame 从 VPS 独立发起上游请求。账户授权和内容/画质参数保持不变；设备及网络 metadata 仍按下述代理策略规范化。Surge 到 Bili-Acc 的外层请求使用 `application/x-bili-acc-grpc` 普通二进制 HTTP 隧道，后端再恢复为上游 `application/grpc`，并强制上游响应使用 `grpc-accept-encoding: identity`，避免 Cloudflare/Caddy 将该请求误判为需要端到端 HTTP/2 gRPC 的连接并返回 HTML 错误页。响应体最多缓冲 8 MiB，以便在读取上游 trailer 后同时保留真实 gRPC trailer，并通过内部普通响应头镜像经过校验的 `grpc-status`；Surge 会移除内部头并恢复 `Grpc-Status`，因此外层 CDN 即使不保留普通 HTTP trailer，也不会丢失 RPC 状态。无法安全解析或不含 `ad_extra` 的请求保持原样转发；其他主机、路径或 HTTP 方法不会转发。
 
 原生 App 必须先通过此路由获取播放地址，使媒体 URL 的来源 IP 签名绑定到 VPS 出口；随后 `/proxy/` 才能使用同一出口拉取媒体，避免手机直取 playurl、VPS 拉媒体造成的 IP 签名不一致和上游 `403`。
 
@@ -290,9 +290,9 @@ Surge 还需要：
 - 安装并信任 Surge CA；
 - 允许模块 MITM playurl API 和媒体 CDN 域名。
 
-网页端请求仍通过 `/playurl/` 响应改写。原生 App 的 `Player/PlayViewUnite` POST 请求会先改写到 Bili-Acc `/playurl-grpc/`，让 B 站按 VPS 出口生成媒体签名；随后 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求改写为 `/proxy/` 地址，并保留 `Range` 等流式请求头。服务端不会修改已签名媒体 URL 的 hostname；对于 gRPC playurl 请求，服务端会保留账户授权和设备身份，但移除 `x-bili-device-bin` 的远程指纹字段，将网络 metadata 规范为普通 Wi-Fi，并移除客户端区域/实验提示，避免上游继续按客户端网络环境生成媒体签名。
+网页端请求仍通过 `/playurl/` 响应改写。原生 App 的 `Player/PlayViewUnite` POST 请求会先改写到 Bili-Acc `/playurl-grpc/`，随后 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求改写为 `/proxy/` 地址，并保留 `Range` 等流式请求头。服务端不会修改已签名媒体 URL 的 hostname；对于 gRPC playurl 请求，服务端会保留账户授权和设备身份，并移除 `x-bili-device-bin` 的远程指纹字段、将网络 metadata 规范为普通 Wi-Fi、移除客户端区域/实验提示。实测部分 `playurlv3` URL 的 `oi` 仍可能绑定客户端出口。抓取到的 iOS 请求还包含体积较大的客户端 `ad_extra` 上下文，因此后端会在 VPS 重放前移除该字段作为受控实验；这不能保证上游一定改用 VPS 出口签名，仍须以新 URL 的 `oi` 和媒体 `200/206` 实测验证。遇到候选 403 时继续尝试 B 站返回的独立签名备用 URL。
 
-为避免对共享 CDN `*.akamaized.net` 做全域 MITM，模块只 MITM `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的 `Player/PlayViewUnite` 原生播放请求与响应。请求脚本以 binary body mode 保存 protobuf 请求体，通过普通二进制 HTTP 隧道转发到 VPS，并声明 `grpc-accept-encoding: identity`。响应脚本按 PlayerUnite protobuf 字段结构处理视频、普通音频、Dolby、无损音频和分段流 URL，将同一媒体项的主/备用签名 URL 注册为后端短期 fallback 组，再把各候选字段改写为 `/proxy-group/`；后端会优先使用播放器选择的候选，在连接、TLS、超时或上游 5xx 时于发送响应头前自动尝试该组下一条原始签名 URL，不通过修改 hostname 伪造换源；如果上游仍返回 gzip message frame，脚本会先解压、改写并重新输出未压缩 frame。未知压缩算法或没有 B 站备用地址时保持原样。主模块完全不声明 `akamaized.net` MITM。
+为避免对共享 CDN `*.akamaized.net` 做全域 MITM，模块只 MITM `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的 `Player/PlayViewUnite` 原生播放请求与响应。请求脚本以 binary body mode 保存 protobuf 请求体，通过普通二进制 HTTP 隧道转发到 VPS，并声明 `grpc-accept-encoding: identity`。响应脚本按 PlayerUnite protobuf 字段结构处理视频、普通音频、Dolby、无损音频和分段流 URL，将同一媒体项的主/备用签名 URL 注册为后端短期 fallback 组，再把各候选字段改写为 `/proxy-group/`；后端会优先使用播放器选择的候选，在连接、TLS、超时、上游 403 或 5xx 时于发送响应头前自动尝试该组下一条原始签名 URL，不通过修改 hostname 伪造换源；如果上游仍返回 gzip message frame，脚本会先解压、改写并重新输出未压缩 frame。未知压缩算法或没有 B 站备用地址时保持原样。主模块完全不声明 `akamaized.net` MITM。
 
 若模块没有生效，在 Surge 的脚本日志或请求备注中搜索 `[Bili Acc]`；模块已启用 `debug=true`，因此命中脚本的 `console.log()` 会同时写入请求备注。更新模块后应确认请求日志包含 `tunnel=http`；如果仍只有 `compression=identity`，说明 Surge 仍在使用旧版远程脚本，应删除旧模块后从原始模块 URL 重新安装。模块的 `script-path` 带版本参数，用于在发布修复时绕过 Surge 的远程脚本缓存。一次正常的点播请求至少应看到：
 
