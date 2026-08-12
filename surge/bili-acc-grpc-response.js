@@ -49,28 +49,50 @@
   }
 
   const encoding = getHeader($response.headers || {}, "grpc-encoding").split(",", 1)[0].trim().toLowerCase();
-  const result = transformGRPC(body, encoding);
-  if (!result) {
+  const prepared = prepareGRPC(body, encoding);
+  if (!prepared) {
     log("skip reason=invalid_grpc");
     passThrough();
     return;
   }
-  if (result.compressed) {
+  if (prepared.compressed) {
     log(`skip reason=compressed_frame encoding=${safeToken(encoding || "unknown")}`);
     passThrough();
     return;
   }
-
-  const endpoint = safeEndpoint(String($request.url || ""));
-  log(`rewrite endpoint=${endpoint} frames=${result.frames} media_urls=${result.rewritten} decompressed_frames=${result.decompressed}`);
-  if (result.rewritten === 0 && result.decompressed === 0) {
-    $done(tunnelStatus ? {headers} : {});
+  if (prepared.groups.length > 0 && typeof $httpClient !== "undefined" && typeof $httpClient.post === "function") {
+    const registrationURL = `${server}/media-groups/${encodeURIComponent(token)}`;
+    $httpClient.post({url: registrationURL, headers: {"Content-Type": "application/json"}, body: JSON.stringify({groups: prepared.groups.map((urls) => ({urls}))})}, (error, response, responseBody) => {
+      let ids = [];
+      if (!error && Number(response && response.status) >= 200 && Number(response && response.status) < 300) {
+        try {
+          const parsed = JSON.parse(responseBody || "{}");
+          if (Array.isArray(parsed.ids) && parsed.ids.length === prepared.groups.length) ids = parsed.ids.map(String);
+        } catch (_) {}
+      }
+      finishGRPC(prepared, ids);
+    });
     return;
   }
+  finishGRPC(prepared, []);
 
-  for (const name of ["content-length", "content-encoding", "content-md5", "digest", "etag"]) deleteHeader(headers, name);
-  if (result.decompressed > 0) deleteHeader(headers, "grpc-encoding");
-  $done({body: result.bytes, headers});
+  function finishGRPC(prepared, groupIDs) {
+    const result = transformPreparedGRPC(prepared, groupIDs);
+    if (!result) {
+      log("skip reason=invalid_grpc");
+      passThrough();
+      return;
+    }
+    const endpoint = safeEndpoint(String($request.url || ""));
+    log(`rewrite endpoint=${endpoint} frames=${result.frames} media_urls=${result.rewritten} fallback_groups=${groupIDs.length} decompressed_frames=${result.decompressed}`);
+    if (result.rewritten === 0 && result.decompressed === 0) {
+      $done(tunnelStatus ? {headers} : {});
+      return;
+    }
+    for (const name of ["content-length", "content-encoding", "content-md5", "digest", "etag"]) deleteHeader(headers, name);
+    if (result.decompressed > 0) deleteHeader(headers, "grpc-encoding");
+    $done({body: result.bytes, headers});
+  }
 
   function passThrough() {
     $done(tunneledResponse ? {headers} : {});
@@ -86,24 +108,22 @@
     return headers;
   }
 
-  function transformGRPC(bytes, compression) {
-    const chunks = [];
+  function prepareGRPC(bytes, compression) {
+    const frames = [];
+    const groups = [];
     let offset = 0;
-    let rewritten = 0;
     let decompressed = 0;
-    let frames = 0;
     while (offset < bytes.length) {
       if (offset + 5 > bytes.length) return null;
       const flags = bytes[offset];
       const length = ((bytes[offset + 1] << 24) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 8) | bytes[offset + 4]) >>> 0;
       const end = offset + 5 + length;
       if (end > bytes.length) return null;
-
       let payload = bytes.slice(offset + 5, end);
       let outputFlags = flags;
       if ((flags & 1) !== 0) {
         if (compression !== "gzip" || typeof $utils === "undefined" || typeof $utils.ungzip !== "function") {
-          return {bytes, rewritten: 0, decompressed: 0, frames: frames + 1, compressed: true};
+          return {compressed: true, groups: [], frames: [], decompressed: 0};
         }
         try {
           payload = $utils.ungzip(payload);
@@ -114,25 +134,53 @@
         outputFlags = flags & 254;
         decompressed++;
       }
+      const collected = collectGroups(payload, "PlayViewUniteReply", groups);
+      if (!collected.valid) return null;
+      frames.push({flags: outputFlags, payload});
+      offset = end;
+    }
+    return {compressed: false, groups, frames, decompressed};
+  }
 
-      const transformed = transformMessage(payload, "PlayViewUniteReply");
+  function transformPreparedGRPC(prepared, groupIDs) {
+    const chunks = [];
+    let rewritten = 0;
+    for (const frame of prepared.frames) {
+      const transformed = transformMessage(frame.payload, "PlayViewUniteReply", groupIDs, {value: 0});
       if (!transformed.valid) return null;
       rewritten += transformed.rewritten;
-      frames++;
       const header = new Uint8Array(5);
-      header[0] = outputFlags;
+      header[0] = frame.flags;
       const transformedLength = transformed.bytes.length;
       header[1] = (transformedLength >>> 24) & 255;
       header[2] = (transformedLength >>> 16) & 255;
       header[3] = (transformedLength >>> 8) & 255;
       header[4] = transformedLength & 255;
       chunks.push(header, transformed.bytes);
-      offset = end;
     }
-    return {bytes: concat(chunks), rewritten, decompressed, frames, compressed: false};
+    return {bytes: concat(chunks), rewritten, decompressed: prepared.decompressed, frames: prepared.frames.length};
   }
 
-  function transformMessage(bytes, type) {
+  function collectGroups(bytes, type, groups) {
+    const fields = parseFields(bytes);
+    if (!fields) return {valid: false};
+    const children = SCHEMAS[type] || {};
+    for (const field of fields) {
+      const childType = children[field.number];
+      if (childType && field.wireType === 2 && !collectGroups(field.payload, childType, groups).valid) return {valid: false};
+    }
+    const layout = URL_LAYOUTS[type];
+    if (layout) {
+      const urls = fields
+        .filter((field) => (field.number === layout.primary || field.number === layout.backup) && field.wireType === 2)
+        .map((field) => asciiURL(field.payload))
+        .filter(isMediaURL);
+      if (urls.length > 0) groups.push(urls);
+    }
+    return {valid: true};
+  }
+
+  function transformMessage(bytes, type, groupIDs, groupIndex) {
     const fields = parseFields(bytes);
     if (!fields) return {valid: false, bytes, rewritten: 0};
     let rewritten = 0;
@@ -142,7 +190,7 @@
     for (const field of fields) {
       const childType = children[field.number];
       if (!childType || field.wireType !== 2) continue;
-      const nested = transformMessage(field.payload, childType);
+      const nested = transformMessage(field.payload, childType, groupIDs, groupIndex);
       if (!nested.valid) return {valid: false, bytes, rewritten: 0};
       if (nested.rewritten > 0) {
         field.payload = nested.bytes;
@@ -154,11 +202,13 @@
 
     const layout = URL_LAYOUTS[type];
     if (layout) {
-      for (const field of fields) {
-        if ((field.number !== layout.primary && field.number !== layout.backup) || field.wireType !== 2) continue;
+      const mediaFields = fields.filter((field) => (field.number === layout.primary || field.number === layout.backup) && field.wireType === 2 && isMediaURL(asciiURL(field.payload)));
+      const groupID = groupIDs[groupIndex.value] || "";
+      if (mediaFields.length > 0) groupIndex.value++;
+      for (let index = 0; index < mediaFields.length; index++) {
+        const field = mediaFields[index];
         const mediaURL = asciiURL(field.payload);
-        if (!isMediaURL(mediaURL)) continue;
-        field.payload = asciiBytes(proxyURL(mediaURL));
+        field.payload = asciiBytes(groupID ? proxyGroupURL(groupID, index) : proxyURL(mediaURL));
         field.changed = true;
         changed = true;
         rewritten++;
@@ -272,6 +322,10 @@
 
   function isMediaURL(value) {
     return /^https?:\/\/[^/]+\//i.test(String(value));
+  }
+
+  function proxyGroupURL(id, preferred) {
+    return `${server}/proxy-group/${encodeURIComponent(token)}/${encodeURIComponent(id)}/${preferred}`;
   }
 
   function proxyURL(value) {

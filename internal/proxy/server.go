@@ -52,6 +52,8 @@ type server struct {
 	wbiKeyExpires      time.Time
 	wbiRefresh         chan struct{}
 	wbiFetchTimeout    time.Duration
+	mediaGroupMu       sync.Mutex
+	mediaGroups        map[string]mediaGroup
 }
 
 type requestLog struct {
@@ -121,6 +123,7 @@ func newServer(token, publicURL string, mediaHosts []string) *server {
 		clientIPMode:       "masked",
 		dedup:              make(map[string]*dedupState),
 		wbiFetchTimeout:    3 * time.Second,
+		mediaGroups:        make(map[string]mediaGroup),
 		client: &http.Client{
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
@@ -162,7 +165,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grpcPlayurl := strings.HasPrefix(r.URL.Path, "/playurl-grpc/")
-	if grpcPlayurl {
+	mediaRegistration := strings.HasPrefix(r.URL.Path, "/media-groups/")
+	if grpcPlayurl || mediaRegistration {
 		if r.Method != http.MethodPost {
 			meta.errorStage = "method"
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -178,8 +182,12 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "Bili CF Acc is running")
+	case strings.HasPrefix(r.URL.Path, "/proxy-group/"):
+		s.handleMediaGroup(w, r)
 	case strings.HasPrefix(r.URL.Path, "/proxy/"):
 		s.handleMedia(w, r)
+	case mediaRegistration:
+		s.handleMediaGroupRegistration(w, r)
 	case grpcPlayurl:
 		s.handleGRPCPlayurl(w, r)
 	case strings.HasPrefix(r.URL.Path, "/playurl/"):
@@ -197,17 +205,21 @@ func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {
 		writeTargetError(w, err)
 		return
 	}
+	s.handleMediaTargets(w, r, []*url.URL{target})
+}
+
+func (s *server) handleMediaTargets(w http.ResponseWriter, r *http.Request, targets []*url.URL) {
 	meta := requestLogFrom(r)
-	meta.targetHost = diagnosticHost(target.Hostname())
-	if !allowedHost(target.Hostname(), s.mediaHosts) {
+	if len(targets) == 0 || !allowedHost(targets[0].Hostname(), s.mediaHosts) {
 		meta.errorStage = "target_validation"
 		http.Error(w, "Host not allowed", http.StatusForbidden)
 		return
 	}
+	meta.targetHost = diagnosticHost(targets[0].Hostname())
 	headers := copyRequestHeaders(r.Header, []string{
 		"Accept", "If-Modified-Since", "If-None-Match", "If-Range", "Range", "User-Agent",
 	})
-	if isPlaylist("", target.Path) {
+	if isPlaylist("", targets[0].Path) {
 		headers.Del("If-Range")
 		headers.Del("Range")
 	}
@@ -216,9 +228,7 @@ func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	fetchStarted := s.now()
-	response, finalURL, err := s.fetchAllowed(ctx, r.Method, target, headers, func(u *url.URL) bool {
-		return allowedHost(u.Hostname(), s.mediaHosts)
-	})
+	response, finalURL, err := s.fetchMediaCandidates(ctx, r.Method, targets, headers)
 	if err != nil {
 		if requestCancelled(r, err) {
 			markRequestCancelled(meta, "upstream_wait")
@@ -231,6 +241,7 @@ func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	meta.upstreamHeaderMS = max(s.now().Sub(fetchStarted).Milliseconds(), 0)
 	meta.upstreamHeaderObserved = true
 	defer response.Body.Close()
+	meta.targetHost = diagnosticHost(finalURL.Hostname())
 	meta.upstreamStatus = response.StatusCode
 
 	playlist := r.Method == http.MethodGet && isPlaylist(response.Header.Get("Content-Type"), finalURL.Path)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -24,6 +25,61 @@ func proxyPath(prefix, token, target string) string {
 	u, _ := url.Parse(target)
 	origin := u.Scheme + "://" + u.Host
 	return prefix + token + "/" + base64.RawURLEncoding.EncodeToString([]byte(origin)) + u.RequestURI()
+}
+
+func TestMediaGroupRetriesConnectionErrorsAndUpstream5xx(t *testing.T) {
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	attempts := []string{}
+	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		attempts = append(attempts, request.URL.Host)
+		switch request.URL.Host {
+		case "first.bilivideo.com":
+			return nil, errors.New("dial failed")
+		case "second.bilivideo.com":
+			return &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("bad")), Request: request}, nil
+		default:
+			return &http.Response{StatusCode: http.StatusPartialContent, Header: http.Header{"Content-Type": {"video/mp4"}}, Body: io.NopCloser(strings.NewReader("ok")), Request: request}, nil
+		}
+	})
+	registration := `{"groups":[{"urls":["https://first.bilivideo.com/video.m4s","https://second.bilivideo.com/video.m4s","https://third.bilivideo.com/video.m4s"]}]}`
+	registerRequest := httptest.NewRequest(http.MethodPost, "/media-groups/"+testToken, strings.NewReader(registration))
+	registerResponse := httptest.NewRecorder()
+	app.ServeHTTP(registerResponse, registerRequest)
+	if registerResponse.Code != http.StatusOK {
+		t.Fatalf("registration status = %d body=%q", registerResponse.Code, registerResponse.Body.String())
+	}
+	var registered mediaGroupRegistrationResponse
+	if err := json.Unmarshal(registerResponse.Body.Bytes(), &registered); err != nil || len(registered.IDs) != 1 {
+		t.Fatalf("registration = %#v err=%v", registered, err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/proxy-group/"+testToken+"/"+registered.IDs[0]+"/0", nil)
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusPartialContent || response.Body.String() != "ok" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	if got := strings.Join(attempts, ","); got != "first.bilivideo.com,second.bilivideo.com,third.bilivideo.com" {
+		t.Fatalf("attempts = %q", got)
+	}
+}
+
+func TestMediaGroupDoesNotRetryUpstream403(t *testing.T) {
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	attempts := 0
+	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		attempts++
+		return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("forbidden")), Request: request}, nil
+	})
+	registration := `{"groups":[{"urls":["https://first.bilivideo.com/video.m4s","https://second.bilivideo.com/video.m4s"]}]}`
+	registerResponse := httptest.NewRecorder()
+	app.ServeHTTP(registerResponse, httptest.NewRequest(http.MethodPost, "/media-groups/"+testToken, strings.NewReader(registration)))
+	var registered mediaGroupRegistrationResponse
+	_ = json.Unmarshal(registerResponse.Body.Bytes(), &registered)
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/proxy-group/"+testToken+"/"+registered.IDs[0]+"/0", nil))
+	if response.Code != http.StatusForbidden || attempts != 1 {
+		t.Fatalf("response=%d attempts=%d", response.Code, attempts)
+	}
 }
 
 func TestMediaProxyForwardsRange(t *testing.T) {

@@ -14,8 +14,10 @@ func requestRoute(path string) string {
 	switch {
 	case path == "/":
 		return "health"
-	case strings.HasPrefix(path, "/proxy/"):
+	case strings.HasPrefix(path, "/proxy/"), strings.HasPrefix(path, "/proxy-group/"):
 		return "media"
+	case strings.HasPrefix(path, "/media-groups/"):
+		return "media_registration"
 	case strings.HasPrefix(path, "/playurl-grpc/"):
 		return "playurl_grpc"
 	case strings.HasPrefix(path, "/playurl/"):
@@ -196,7 +198,7 @@ func setCORS(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Vary", "Origin")
 	methods := "GET, HEAD, OPTIONS"
-	if strings.HasPrefix(r.URL.Path, "/playurl-grpc/") {
+	if strings.HasPrefix(r.URL.Path, "/playurl-grpc/") || strings.HasPrefix(r.URL.Path, "/media-groups/") {
 		methods = "POST, OPTIONS"
 	}
 	w.Header().Set("Access-Control-Allow-Methods", methods)

@@ -198,11 +198,11 @@ test("gRPC response wraps each media URL without changing its origin", () => {
   assert.equal(result.headers["Content-Length"], undefined);
   assert.equal(result.headers["X-Bili-Acc-Grpc-Status"], undefined);
   assert.equal(result.headers["Grpc-Status"], "0");
-  assert.deepEqual(logs, ["[Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 media_urls=2 decompressed_frames=0"]);
+  assert.deepEqual(logs, ["[Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 media_urls=2 fallback_groups=0 decompressed_frames=0"]);
   assert.doesNotMatch(logs[0], /test-token|aHR0|deadline=|video\.m4s/);
 });
 
-test("gRPC response preserves distinct primary and backup URLs", () => {
+test("gRPC response uses registered backend fallback groups when available", () => {
   const akamai = "https://upos-sz-mirrorcosov.bilivideo.com/main.m4s";
   const preferred = "https://upos-sz-mirrorali.bilivideo.com/preferred.m4s";
   const later = "https://upos-sz-mirrorcosov.bilivideo.com/later.m4s";
@@ -212,14 +212,20 @@ test("gRPC response preserves distinct primary and backup URLs", () => {
     protobufBytesField(2, later),
   ]);
   const reply = protobufBytesField(1, protobufBytesField(5, protobufBytesField(2, dashVideo)));
+  let registered;
   const result = runScript("bili-acc-grpc-response.js", {
+    $httpClient: {post(options, callback) {
+      registered = JSON.parse(options.body);
+      callback(null, {status: 200}, JSON.stringify({ids: ["0123456789abcdef0123456789abcdef"]}));
+    }},
     $request: {url: "https://grpc.biliapi.net/bilibili.app.playerunite.v1.Player/PlayViewUnite", headers: {}},
     $response: {headers: {"Content-Type": "application/grpc"}, body: grpcFrame(reply)},
   });
+  assert.deepEqual(registered.groups[0].urls, [akamai, preferred, later]);
   const rewritten = Buffer.from(result.body).toString("latin1");
-  assert.equal(rewritten.includes(proxiedMediaURL(akamai)), true);
-  assert.equal(rewritten.includes(proxiedMediaURL(preferred)), true);
-  assert.equal(rewritten.includes(proxiedMediaURL(later)), true);
+  for (let index = 0; index < 3; index++) {
+    assert.match(rewritten, new RegExp(`https://bili\\.example\\.com/proxy-group/test-token/0123456789abcdef0123456789abcdef/${index}`));
+  }
 });
 
 test("gRPC response rewrites regular, Dolby, and lossless audio URLs", () => {
@@ -308,7 +314,7 @@ test("gRPC response decompresses gzip frames before rewriting", () => {
   assert.equal(rewritten.toString("latin1").includes(proxiedMediaURL(backup)), true);
   assert.equal(result.headers["grpc-encoding"], undefined);
   assert.equal(result.headers["Content-Encoding"], undefined);
-  assert.deepEqual(logs, ["[Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 media_urls=2 decompressed_frames=1"]);
+  assert.deepEqual(logs, ["[Bili Acc][grpc-response] rewrite endpoint=/bilibili.app.playerunite.v1.Player/PlayViewUnite frames=1 media_urls=2 fallback_groups=0 decompressed_frames=1"]);
 });
 
 test("gRPC response skips unsupported compressed frames", () => {
