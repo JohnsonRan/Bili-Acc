@@ -290,7 +290,7 @@ Surge 还需要：
 - 安装并信任 Surge CA；
 - 允许模块 MITM playurl API 和媒体 CDN 域名。
 
-网页端请求仍通过 `/playurl/` 响应改写。原生 App 的 `Player/PlayViewUnite` POST 请求会先改写到 Bili-Acc `/playurl-grpc/`，让 B 站按 VPS 出口生成媒体签名；随后 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求改写为 `/proxy/` 地址，并保留 `Range` 等流式请求头。作为服务端兜底，`/proxy/` 在实际请求上游前也会将海外 COS/Huawei/Ali/AWS/Akamai 兼容组统一规范为 `upos-sz-mirrorali.bilivideo.com`，因此客户端即使仍提交 `mirrorcosov` 或 `mirrorhwov` URL，VPS 也不会直接访问这些节点。
+网页端请求仍通过 `/playurl/` 响应改写。原生 App 的 `Player/PlayViewUnite` POST 请求会先改写到 Bili-Acc `/playurl-grpc/`，让 B 站按 VPS 出口生成媒体签名；随后 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求改写为 `/proxy/` 地址，并保留 `Range` 等流式请求头。服务端不会修改已签名媒体 URL 的 hostname；对于 gRPC playurl 请求，服务端会保留账户授权和设备身份，但移除 `x-bili-device-bin` 的远程指纹字段，将网络 metadata 规范为普通 Wi-Fi，并移除客户端区域/实验提示，避免上游继续按客户端网络环境生成媒体签名。
 
 为避免对共享 CDN `*.akamaized.net` 做全域 MITM，模块只 MITM `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的 `Player/PlayViewUnite` 原生播放请求与响应。请求脚本以 binary body mode 保存 protobuf 请求体，通过普通二进制 HTTP 隧道转发到 VPS，并声明 `grpc-accept-encoding: identity`。响应脚本按 PlayerUnite protobuf 字段结构处理视频、普通音频、Dolby、无损音频和分段流 URL，只将每个原始媒体 URL 包装为 Bili-Acc `/proxy/` URL，不在客户端选择或替换 CDN；海外 CDN 规范化由 Go 后端统一负责；如果上游仍返回 gzip message frame，脚本会先解压、改写并重新输出未压缩 frame。未知压缩算法或没有 B 站备用地址时保持原样。主模块完全不声明 `akamaized.net` MITM。
 

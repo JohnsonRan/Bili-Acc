@@ -569,46 +569,6 @@ func TestPlayurlProxyRejectsOtherAPIs(t *testing.T) {
 	}
 }
 
-func TestMediaProxyNormalizesOverseaCDNBeforeFetching(t *testing.T) {
-	for _, sourceHost := range []string{
-		"upos-hz-mirrorakam.akamaized.net",
-		"upos-sz-mirrorawsov.bilivideo.com",
-		"upos-sz-mirroraliov.bilivideo.com",
-		"upos-sz-mirrorcosov.bilivideo.com",
-		"upos-sz-mirrorhwov.bilivideo.com",
-	} {
-		t.Run(sourceHost, func(t *testing.T) {
-			app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
-			app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
-				if request.URL.Host != "upos-sz-mirrorali.bilivideo.com" || request.URL.Path != "/video.m4s" || request.URL.RawQuery != "oi=2582799872&upsig=secret" {
-					t.Fatalf("upstream target = %q", request.URL.String())
-				}
-				return &http.Response{
-					StatusCode: http.StatusPartialContent,
-					Header:     http.Header{"Content-Type": {"video/mp4"}},
-					Body:       io.NopCloser(strings.NewReader("ok")),
-					Request:    request,
-				}, nil
-			})
-			target := "https://" + sourceHost + "/video.m4s?oi=2582799872&upsig=secret"
-			request := httptest.NewRequest(http.MethodGet, proxyPath("/proxy/", testToken, target), nil)
-			response := httptest.NewRecorder()
-			app.ServeHTTP(response, request)
-			if response.Code != http.StatusPartialContent || response.Body.String() != "ok" {
-				t.Fatalf("response = %d %q", response.Code, response.Body.String())
-			}
-		})
-	}
-}
-
-func TestMediaProxyLeavesOtherCDNHostsUnchanged(t *testing.T) {
-	target, _ := url.Parse("https://d1--ov-gotcha207.bilivideo.com/video.m4s?deadline=1")
-	normalized, changed := normalizeOverseaMediaTarget(target)
-	if changed || normalized.String() != target.String() {
-		t.Fatalf("normalized unrelated target = %q changed=%t", normalized, changed)
-	}
-}
-
 func TestPlaylistRangeIsRemovedAndPartialResponseRejected(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Range"); got != "" {
@@ -743,6 +703,36 @@ func TestPlaylistRewrite(t *testing.T) {
 	}
 	if !strings.Contains(rewritten, "\n \t\r\n") {
 		t.Fatalf("whitespace-only line was changed: %q", rewritten)
+	}
+}
+
+func TestNormalizeGRPCMetadataRemovesRemoteFingerprintAndClientNetworkHints(t *testing.T) {
+	device := []byte{0x08, 0x01, 0x62, 0x06, 'r', 'e', 'm', 'o', 't', 'e', 0x6a, 0x07, 'v', 'e', 'r', 's', 'i', 'o', 'n'}
+	headers := http.Header{
+		"X-Bili-Device-Bin":  {base64.StdEncoding.EncodeToString(device)},
+		"X-Bili-Network-Bin": {base64.StdEncoding.EncodeToString([]byte{0x08, 0x02, 0x18, 0x01, 0x1a, 0x03, '4', '4', '0'})},
+		"X-Bili-Aurora-Zone": {"jp001"},
+		"X-Bili-Exps-Bin":    {"experiment"},
+		"Authorization":      {"identify_v1 secret"},
+	}
+	normalizeGRPCMetadata(headers)
+	decoded, err := base64.StdEncoding.DecodeString(headers.Get("X-Bili-Device-Bin"))
+	if err != nil || !bytes.Equal(decoded, []byte{0x08, 0x01, 0x6a, 0x07, 'v', 'e', 'r', 's', 'i', 'o', 'n'}) {
+		t.Fatalf("device metadata = %x err=%v", decoded, err)
+	}
+	if headers.Get("X-Bili-Network-Bin") != "CAE=" || headers.Get("X-Bili-Aurora-Zone") != "" || headers.Get("X-Bili-Exps-Bin") != "" {
+		t.Fatalf("normalized headers = %v", headers)
+	}
+	if headers.Get("Authorization") != "identify_v1 secret" {
+		t.Fatal("authorization was removed")
+	}
+}
+
+func TestNormalizeGRPCMetadataPreservesMalformedDeviceValue(t *testing.T) {
+	headers := http.Header{"X-Bili-Device-Bin": {"not-base64"}}
+	normalizeGRPCMetadata(headers)
+	if headers.Get("X-Bili-Device-Bin") != "not-base64" {
+		t.Fatalf("device metadata = %q", headers.Get("X-Bili-Device-Bin"))
 	}
 }
 

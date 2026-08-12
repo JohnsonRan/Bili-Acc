@@ -22,14 +22,7 @@ var (
 		regexp.MustCompile(`^/xlive/web-room/v2/index/getRoomPlayInfo$`),
 		regexp.MustCompile(`^/room/v1/Room/playUrl$`),
 	}
-	grpcPlayurlHosts  = []string{"grpc.biliapi.net", "app.bilibili.com", "app.biliapi.net"}
-	overseaMediaHosts = map[string]bool{
-		"upos-hz-mirrorakam.akamaized.net":  true,
-		"upos-sz-mirrorawsov.bilivideo.com": true,
-		"upos-sz-mirroraliov.bilivideo.com": true,
-		"upos-sz-mirrorcosov.bilivideo.com": true,
-		"upos-sz-mirrorhwov.bilivideo.com":  true,
-	}
+	grpcPlayurlHosts = []string{"grpc.biliapi.net", "app.bilibili.com", "app.biliapi.net"}
 )
 
 const grpcPlayurlPath = "/bilibili.app.playerunite.v1.Player/PlayViewUnite"
@@ -130,16 +123,6 @@ func closeRedirectBody(response *http.Response) {
 		<-done
 	}
 	response.Body.Close()
-}
-
-func normalizeOverseaMediaTarget(target *url.URL) (*url.URL, bool) {
-	host, ok := normalizeDNSHostname(target.Hostname())
-	if !ok || !overseaMediaHosts[host] {
-		return target, false
-	}
-	normalized := *target
-	normalized.Host = "upos-sz-mirrorali.bilivideo.com"
-	return &normalized, true
 }
 
 func allowedHost(hostname string, suffixes []string) bool {
