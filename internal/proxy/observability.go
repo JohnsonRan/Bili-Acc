@@ -112,24 +112,30 @@ type recentError struct {
 }
 
 type hostCounters struct {
-	Requests  uint64
-	Errors    uint64
-	Status403 uint64
+	Requests       uint64
+	Errors         uint64
+	Status403      uint64
+	UpstreamStalls uint64
 }
 
 type metricBucket struct {
-	Second         int64
-	Requests       uint64
-	Success        uint64
-	Failed         uint64
-	Cancelled      uint64
-	MediaRequests  uint64
-	Status403      uint64
-	Bytes          uint64
-	Statuses       [600]uint64
-	GRPCStatuses   [grpcStatusSlots]uint64
-	LatencyBuckets [len(latencyBoundsMS) + 1]uint64
-	Hosts          map[string]hostCounters
+	Second             int64
+	Requests           uint64
+	Success            uint64
+	Failed             uint64
+	Cancelled          uint64
+	MediaRequests      uint64
+	Status403          uint64
+	UpstreamStalls     uint64
+	CandidateAttempts  uint64
+	Fallbacks          uint64
+	FallbackRecoveries uint64
+	CandidateExhausted uint64
+	Bytes              uint64
+	Statuses           [600]uint64
+	GRPCStatuses       [grpcStatusSlots]uint64
+	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
+	Hosts              map[string]hostCounters
 }
 
 type metricsStore struct {
@@ -172,6 +178,9 @@ func (m *metricsStore) record(observation requestObservation) {
 	if observation.Status == http.StatusForbidden || observation.UpstreamStatus == http.StatusForbidden {
 		bucket.Status403++
 	}
+	if observation.Result == "upstream_stall" {
+		bucket.UpstreamStalls++
+	}
 	if observation.Route == "playurl_grpc" && observation.GRPCStatus != "" {
 		bucket.GRPCStatuses[grpcStatusIndex(observation.GRPCStatus)]++
 	}
@@ -190,6 +199,9 @@ func (m *metricsStore) record(observation requestObservation) {
 		}
 		if observation.Status == http.StatusForbidden || observation.UpstreamStatus == http.StatusForbidden {
 			counters.Status403++
+		}
+		if observation.Result == "upstream_stall" {
+			counters.UpstreamStalls++
 		}
 		bucket.Hosts[host] = counters
 	}
@@ -211,6 +223,25 @@ func (m *metricsStore) record(observation requestObservation) {
 			m.recentErrors = append(m.recentErrors, errorItem)
 		}
 	}
+}
+
+func (m *metricsStore) recordCandidateSelection(now time.Time, attempts int, recovered, exhausted bool) {
+	if attempts <= 0 {
+		return
+	}
+	m.mu.Lock()
+	bucket := m.bucketLocked(now.Unix())
+	bucket.CandidateAttempts += uint64(attempts)
+	if attempts > 1 {
+		bucket.Fallbacks++
+	}
+	if recovered {
+		bucket.FallbackRecoveries++
+	}
+	if exhausted {
+		bucket.CandidateExhausted++
+	}
+	m.mu.Unlock()
 }
 
 func (m *metricsStore) addMediaBytes(now time.Time, count int64) {
@@ -266,17 +297,23 @@ type windowSnapshot struct {
 	MediaRequests       int            `json:"media_requests"`
 	ClientCancelled     int            `json:"client_cancelled"`
 	Status403           int            `json:"status_403"`
+	UpstreamStalls      int            `json:"upstream_stalls"`
+	CandidateAttempts   int            `json:"candidate_attempts"`
+	Fallbacks           int            `json:"fallbacks"`
+	FallbackRecoveries  int            `json:"fallback_recoveries"`
+	CandidateExhausted  int            `json:"candidate_exhausted"`
 	Statuses            map[string]int `json:"statuses"`
 	UpstreamHeaderP50MS int64          `json:"upstream_header_p50_ms"`
 	UpstreamHeaderP95MS int64          `json:"upstream_header_p95_ms"`
 }
 
 type hostSnapshot struct {
-	Host      string  `json:"host"`
-	Requests  int     `json:"requests"`
-	Errors    int     `json:"errors"`
-	Status403 int     `json:"status_403"`
-	ErrorRate float64 `json:"error_rate"`
+	Host           string  `json:"host"`
+	Requests       int     `json:"requests"`
+	Errors         int     `json:"errors"`
+	Status403      int     `json:"status_403"`
+	UpstreamStalls int     `json:"upstream_stalls"`
+	ErrorRate      float64 `json:"error_rate"`
 }
 
 type diagnosticsSnapshot struct {
@@ -292,17 +329,22 @@ type diagnosticsSnapshot struct {
 }
 
 type metricAggregate struct {
-	Requests       uint64
-	Success        uint64
-	Failed         uint64
-	Cancelled      uint64
-	MediaRequests  uint64
-	Status403      uint64
-	Bytes          uint64
-	Statuses       [600]uint64
-	GRPCStatuses   [grpcStatusSlots]uint64
-	LatencyBuckets [len(latencyBoundsMS) + 1]uint64
-	Hosts          map[string]hostCounters
+	Requests           uint64
+	Success            uint64
+	Failed             uint64
+	Cancelled          uint64
+	MediaRequests      uint64
+	Status403          uint64
+	UpstreamStalls     uint64
+	CandidateAttempts  uint64
+	Fallbacks          uint64
+	FallbackRecoveries uint64
+	CandidateExhausted uint64
+	Bytes              uint64
+	Statuses           [600]uint64
+	GRPCStatuses       [grpcStatusSlots]uint64
+	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
+	Hosts              map[string]hostCounters
 }
 
 func (m *metricsStore) snapshot(now time.Time) diagnosticsSnapshot {
@@ -365,6 +407,11 @@ func (m *metricsStore) aggregateLocked(now time.Time, seconds int, includeHosts 
 		aggregate.Cancelled += bucket.Cancelled
 		aggregate.MediaRequests += bucket.MediaRequests
 		aggregate.Status403 += bucket.Status403
+		aggregate.UpstreamStalls += bucket.UpstreamStalls
+		aggregate.CandidateAttempts += bucket.CandidateAttempts
+		aggregate.Fallbacks += bucket.Fallbacks
+		aggregate.FallbackRecoveries += bucket.FallbackRecoveries
+		aggregate.CandidateExhausted += bucket.CandidateExhausted
 		aggregate.Bytes += bucket.Bytes
 		for status, count := range bucket.Statuses {
 			aggregate.Statuses[status] += count
@@ -392,19 +439,25 @@ func aggregateHost(hosts map[string]hostCounters, host string, counters hostCoun
 	combined.Requests += counters.Requests
 	combined.Errors += counters.Errors
 	combined.Status403 += counters.Status403
+	combined.UpstreamStalls += counters.UpstreamStalls
 	hosts[host] = combined
 }
 
 func windowFromAggregate(aggregate metricAggregate) windowSnapshot {
 	window := windowSnapshot{
-		Requests:        int(aggregate.Requests),
-		Success:         int(aggregate.Success),
-		Failed:          int(aggregate.Failed),
-		Bytes:           int64(aggregate.Bytes),
-		MediaRequests:   int(aggregate.MediaRequests),
-		ClientCancelled: int(aggregate.Cancelled),
-		Status403:       int(aggregate.Status403),
-		Statuses:        make(map[string]int),
+		Requests:           int(aggregate.Requests),
+		Success:            int(aggregate.Success),
+		Failed:             int(aggregate.Failed),
+		Bytes:              int64(aggregate.Bytes),
+		MediaRequests:      int(aggregate.MediaRequests),
+		ClientCancelled:    int(aggregate.Cancelled),
+		Status403:          int(aggregate.Status403),
+		UpstreamStalls:     int(aggregate.UpstreamStalls),
+		CandidateAttempts:  int(aggregate.CandidateAttempts),
+		Fallbacks:          int(aggregate.Fallbacks),
+		FallbackRecoveries: int(aggregate.FallbackRecoveries),
+		CandidateExhausted: int(aggregate.CandidateExhausted),
+		Statuses:           make(map[string]int),
 	}
 	denominator := aggregate.Success + aggregate.Failed
 	if denominator > 0 {
@@ -423,13 +476,16 @@ func windowFromAggregate(aggregate metricAggregate) windowSnapshot {
 func hostsFromAggregate(byHost map[string]hostCounters) []hostSnapshot {
 	hosts := make([]hostSnapshot, 0, len(byHost))
 	for host, counters := range byHost {
-		item := hostSnapshot{Host: host, Requests: int(counters.Requests), Errors: int(counters.Errors), Status403: int(counters.Status403)}
+		item := hostSnapshot{Host: host, Requests: int(counters.Requests), Errors: int(counters.Errors), Status403: int(counters.Status403), UpstreamStalls: int(counters.UpstreamStalls)}
 		if counters.Requests > 0 {
 			item.ErrorRate = float64(counters.Errors) * 100 / float64(counters.Requests)
 		}
 		hosts = append(hosts, item)
 	}
 	sort.Slice(hosts, func(i, j int) bool {
+		if hosts[i].UpstreamStalls != hosts[j].UpstreamStalls {
+			return hosts[i].UpstreamStalls > hosts[j].UpstreamStalls
+		}
 		if hosts[i].Errors != hosts[j].Errors {
 			return hosts[i].Errors > hosts[j].Errors
 		}
@@ -722,6 +778,9 @@ func (s *server) logTrafficSummary(now time.Time, interval time.Duration) {
 		"active_streams", s.metrics.activeStreams(),
 		"client_cancelled", window.ClientCancelled,
 		"status_403", window.Status403,
+		"upstream_stalls", window.UpstreamStalls,
+		"fallback_recoveries", window.FallbackRecoveries,
+		"candidate_exhausted", window.CandidateExhausted,
 		"upstream_header_p95_ms", window.UpstreamHeaderP95MS,
 	)
 }

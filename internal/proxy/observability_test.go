@@ -254,6 +254,10 @@ func TestMediaIdleTimeoutIsClassifiedAsUpstreamStall(t *testing.T) {
 	if !strings.Contains(logs.String(), "result=upstream_stall") || !strings.Contains(logs.String(), "error_stage=upstream_idle") {
 		t.Fatalf("log=%q", logs.String())
 	}
+	snapshot := app.metrics.snapshot(app.now())
+	if snapshot.Windows["15m"].UpstreamStalls != 1 || len(snapshot.Hosts) != 1 || snapshot.Hosts[0].UpstreamStalls != 1 {
+		t.Fatalf("stall snapshot=%+v", snapshot)
+	}
 }
 
 func TestUpstreamFailuresRemainFailuresWhenStreamingIsCancelled(t *testing.T) {
@@ -310,6 +314,17 @@ func TestUpstreamFailuresRemainFailuresWhenStreamingIsCancelled(t *testing.T) {
 				t.Fatalf("log = %q", logs.String())
 			}
 		})
+	}
+}
+
+func TestCandidateSelectionMetricsTrackRecoveryAndExhaustion(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	metrics := newMetricsStore(now)
+	metrics.recordCandidateSelection(now, 3, true, false)
+	metrics.recordCandidateSelection(now, 2, false, true)
+	window := metrics.snapshot(now).Windows["15m"]
+	if window.CandidateAttempts != 5 || window.Fallbacks != 2 || window.FallbackRecoveries != 1 || window.CandidateExhausted != 1 {
+		t.Fatalf("candidate metrics=%+v", window)
 	}
 }
 
@@ -494,7 +509,7 @@ func TestDiagnosticsHandlerHTMLAPIAndSecurityHeaders(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("page status=%d body=%q", page.Code, page.Body.String())
 	}
-	for _, expected := range []string{"Signal Room", "Active streams", "Rolling windows", "CDN and upstream hosts", "gRPC trailers", "Recent sanitized errors", "rel=\"icon\" href=\"data:,\"", "scope=\"col\"", "aria-live=\"polite\"", "data-label", "HTTP / upstream", "Result / gRPC", "@media (max-width: 560px)"} {
+	for _, expected := range []string{"Signal Room", "Active streams", "Playback stalls", "recovered", "Rolling windows", "CDN and upstream hosts", "Stalls", "gRPC trailers", "Recent sanitized errors", "rel=\"icon\" href=\"data:,\"", "scope=\"col\"", "aria-live=\"polite\"", "data-label", "HTTP / upstream", "Result / gRPC", "@media (max-width: 560px)"} {
 		if !strings.Contains(page.Body.String(), expected) {
 			t.Fatalf("diagnostics page missing %q", expected)
 		}

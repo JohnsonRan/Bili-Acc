@@ -177,6 +177,10 @@ func TestMediaGroupRetriesConnectionErrorsAndUpstream5xx(t *testing.T) {
 	if got := strings.Join(attempts, ","); got != "first.bilivideo.com,second.bilivideo.com,third.bilivideo.com" {
 		t.Fatalf("attempts = %q", got)
 	}
+	window := app.metrics.snapshot(app.now()).Windows["15m"]
+	if window.CandidateAttempts != 3 || window.Fallbacks != 1 || window.FallbackRecoveries != 1 || window.CandidateExhausted != 0 {
+		t.Fatalf("candidate metrics=%+v", window)
+	}
 }
 
 func TestMediaGroupDeprioritizesLikelyIPBoundCOSCandidate(t *testing.T) {

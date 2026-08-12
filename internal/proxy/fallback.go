@@ -242,7 +242,9 @@ func retryableMediaStatus(status int) bool {
 
 func (s *server) fetchMediaCandidates(ctx context.Context, method string, candidates []*url.URL, headers http.Header) (*http.Response, *url.URL, error) {
 	var lastErr error
+	attempts := 0
 	for index, target := range candidates {
+		attempts++
 		started := s.now()
 		response, finalURL, err := s.fetchAllowed(ctx, method, target, headers, func(candidate *url.URL) bool {
 			return allowedHost(candidate.Hostname(), s.mediaHosts)
@@ -252,6 +254,7 @@ func (s *server) fetchMediaCandidates(ctx context.Context, method string, candid
 			s.recordCandidateFailure(target, 0)
 			lastErr = err
 			if ctx.Err() != nil || index == len(candidates)-1 {
+				s.metrics.recordCandidateSelection(s.now(), attempts, false, index == len(candidates)-1)
 				return nil, nil, err
 			}
 			continue
@@ -262,6 +265,7 @@ func (s *server) fetchMediaCandidates(ctx context.Context, method string, candid
 			} else if retryableMediaStatus(response.StatusCode) && index < len(candidates)-1 {
 				s.recordCandidateFailure(finalURL, response.StatusCode)
 			}
+			s.metrics.recordCandidateSelection(s.now(), attempts, attempts > 1 && response.StatusCode >= 200 && response.StatusCode < 400, attempts == len(candidates) && retryableMediaStatus(response.StatusCode))
 			return response, finalURL, nil
 		}
 		s.recordCandidateFailure(finalURL, response.StatusCode)
@@ -270,6 +274,7 @@ func (s *server) fetchMediaCandidates(ctx context.Context, method string, candid
 	if lastErr == nil {
 		lastErr = errors.New("no media candidates")
 	}
+	s.metrics.recordCandidateSelection(s.now(), attempts, false, true)
 	return nil, nil, lastErr
 }
 

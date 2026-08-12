@@ -112,7 +112,7 @@
     <article class="panel metric"><span class="label">Active streams</span><strong id="active">—</strong><small>live media bodies</small></article>
     <article class="panel metric"><span class="label">Throughput</span><strong id="throughput">—</strong><small>5-second moving rate</small></article>
     <article class="panel metric"><span class="label">15m success</span><strong id="success">—</strong><small id="request-count">no completed requests</small></article>
-    <article class="panel metric"><span class="label">Header p95</span><strong id="latency">—</strong><small>upstream response start</small></article>
+    <article class="panel metric"><span class="label">Playback stalls</span><strong id="stalls">—</strong><small id="recovery-count">no fallback activity</small></article>
 
     <article class="panel windows">
       <div class="section-head"><h2>Rolling windows</h2><span>completion-based</span></div>
@@ -126,8 +126,8 @@
     </article>
 
     <article class="panel hosts">
-      <div class="section-head"><h2>CDN and upstream hosts</h2><span>errors sort first</span></div>
-      <table><caption class="sr-only">Upstream hosts ranked by recent errors and request volume</caption><thead><tr><th scope="col">Host</th><th scope="col">Requests</th><th scope="col">Errors</th><th scope="col">403</th><th scope="col">Error rate</th></tr></thead><tbody id="hosts"></tbody></table>
+      <div class="section-head"><h2>CDN and upstream hosts</h2><span>errors and stalls sort first</span></div>
+      <table><caption class="sr-only">Upstream hosts ranked by recent errors and request volume</caption><thead><tr><th scope="col">Host</th><th scope="col">Requests</th><th scope="col">Errors</th><th scope="col">Stalls</th><th scope="col">403</th><th scope="col">Error rate</th></tr></thead><tbody id="hosts"></tbody></table>
     </article>
 
     <article class="panel errors">
@@ -171,8 +171,9 @@
     text($('active'), data.active_streams);
     text($('throughput'), rate(data.throughput_bps));
     text($('success'), pct(fifteen.success_rate));
-    text($('request-count'), `${fifteen.requests} completed · ${fifteen.client_cancelled} cancelled`);
-    text($('latency'), `${fifteen.upstream_header_p95_ms || 0} ms`);
+    text($('request-count'), `${fifteen.requests} completed · p95 ${fifteen.upstream_header_p95_ms || 0}ms`);
+    text($('stalls'), fifteen.upstream_stalls || 0);
+    text($('recovery-count'), `${fifteen.fallback_recoveries || 0} recovered · ${fifteen.candidate_exhausted || 0} exhausted`);
 
     const windows = $('windows'); windows.replaceChildren();
     ['1m','5m','15m'].forEach(key => {
@@ -191,10 +192,10 @@
 
     const hosts = $('hosts'); hosts.replaceChildren();
     const hostItems = Array.isArray(data.hosts) ? data.hosts : [];
-    if (!hostItems.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = 5; cell.className = 'empty'; text(cell, 'No upstream hosts observed'); row.append(cell); hosts.append(row); }
+    if (!hostItems.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = 6; cell.className = 'empty'; text(cell, 'No upstream hosts observed'); row.append(cell); hosts.append(row); }
     hostItems.forEach(host => {
       const row = document.createElement('tr');
-      [host.host, host.requests, host.errors, host.status_403, pct(host.error_rate)].forEach((value, index) => { const cell = document.createElement('td'); text(cell, value); if (index > 1 && Number(host.errors) > 0) cell.className = 'danger'; row.append(cell); });
+      [host.host, host.requests, host.errors, host.upstream_stalls, host.status_403, pct(host.error_rate)].forEach((value, index) => { const cell = document.createElement('td'); text(cell, value); if (index > 1 && (Number(host.errors) > 0 || Number(host.upstream_stalls) > 0)) cell.className = 'danger'; row.append(cell); });
       hosts.append(row);
     });
 
