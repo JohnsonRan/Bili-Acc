@@ -229,6 +229,33 @@ func TestPreHeaderCancellationIsSilentWithoutSynthetic502(t *testing.T) {
 	}
 }
 
+func TestMediaIdleTimeoutIsClassifiedAsUpstreamStall(t *testing.T) {
+	var logs bytes.Buffer
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.logger = testLogger(&logs)
+	app.mediaIdleTimeout = 10 * time.Millisecond
+	app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusPartialContent,
+			Header:     http.Header{"Content-Type": {"video/mp4"}},
+			Body:       &blockingReadCloser{closed: make(chan struct{})},
+			Request:    request,
+		}, nil
+	})
+	request := httptest.NewRequest(http.MethodGet, proxyPath("/proxy/", testToken, "https://cdn.bilivideo.com/video.m4s"), nil)
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != http.ErrAbortHandler {
+				t.Fatalf("panic=%v", recovered)
+			}
+		}()
+		app.ServeHTTP(httptest.NewRecorder(), request)
+	}()
+	if !strings.Contains(logs.String(), "result=upstream_stall") || !strings.Contains(logs.String(), "error_stage=upstream_idle") {
+		t.Fatalf("log=%q", logs.String())
+	}
+}
+
 func TestUpstreamFailuresRemainFailuresWhenStreamingIsCancelled(t *testing.T) {
 	tests := []struct {
 		name          string

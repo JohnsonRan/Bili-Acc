@@ -71,6 +71,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	upstreamNetwork, err := envChoice("UPSTREAM_NETWORK", "ipv4", "ipv4", "ipv6", "auto")
+	if err != nil {
+		return err
+	}
+	mediaIdleTimeout, err := envBoundedDuration("MEDIA_IDLE_TIMEOUT", 20*time.Second, 5*time.Second)
+	if err != nil {
+		return err
+	}
 
 	stopFlightRecorder, err := startFlightRecorder(os.Getenv("TRACE_DIR"))
 	if err != nil {
@@ -83,6 +91,8 @@ func run() error {
 		LogMediaSuccess:    logMediaSuccess,
 		ErrorDedupInterval: dedupInterval,
 		ClientIPMode:       clientIPMode,
+		UpstreamNetwork:    upstreamNetwork,
+		MediaIdleTimeout:   mediaIdleTimeout,
 	})
 	servers := []namedServer{{
 		name: "proxy",

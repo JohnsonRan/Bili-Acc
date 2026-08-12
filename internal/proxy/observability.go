@@ -33,6 +33,8 @@ type Options struct {
 	LogMediaSuccess    bool
 	ErrorDedupInterval time.Duration
 	ClientIPMode       string
+	UpstreamNetwork    string
+	MediaIdleTimeout   time.Duration
 }
 
 type Application struct {
@@ -40,13 +42,18 @@ type Application struct {
 }
 
 func NewApplication(token, publicURL, allowedHosts string, options Options) *Application {
-	s := newServer(token, publicURL, splitHosts(allowedHosts))
+	network := strings.ToLower(strings.TrimSpace(options.UpstreamNetwork))
+	if network == "" {
+		network = "ipv4"
+	}
+	s := newServerWithNetwork(token, publicURL, splitHosts(allowedHosts), network)
 	if options.Logger != nil {
 		s.logger = options.Logger
 	}
 	s.logMediaSuccess = options.LogMediaSuccess
 	s.errorDedupInterval = options.ErrorDedupInterval
 	s.clientIPMode = normalizeClientIPMode(options.ClientIPMode)
+	s.mediaIdleTimeout = options.MediaIdleTimeout
 	return &Application{server: s}
 }
 
@@ -567,6 +574,8 @@ func classifyResult(observation requestObservation) string {
 		return "client_cancelled"
 	case "error":
 		return "stream_error"
+	case "upstream_stall":
+		return "upstream_stall"
 	}
 	if observation.Status >= http.StatusInternalServerError {
 		return "upstream_error"

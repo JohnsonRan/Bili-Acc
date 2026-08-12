@@ -54,6 +54,9 @@ type server struct {
 	wbiFetchTimeout    time.Duration
 	mediaGroupMu       sync.Mutex
 	mediaGroups        map[string]mediaGroup
+	candidateMu        sync.Mutex
+	candidateHealth    map[string]candidateHealth
+	mediaIdleTimeout   time.Duration
 }
 
 type requestLog struct {
@@ -103,9 +106,20 @@ func (w *loggingResponseWriter) Unwrap() http.ResponseWriter {
 }
 
 func newServer(token, publicURL string, mediaHosts []string) *server {
+	return newServerWithNetwork(token, publicURL, mediaHosts, "ipv4")
+}
+
+func newServerWithNetwork(token, publicURL string, mediaHosts []string, networkMode string) *server {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
+	}
+	dialNetwork := "tcp4"
+	switch networkMode {
+	case "ipv6":
+		dialNetwork = "tcp6"
+	case "auto":
+		dialNetwork = "tcp"
 	}
 	now := time.Now
 	return &server{
@@ -120,13 +134,15 @@ func newServer(token, publicURL string, mediaHosts []string) *server {
 		dedup:              make(map[string]*dedupState),
 		wbiFetchTimeout:    3 * time.Second,
 		mediaGroups:        make(map[string]mediaGroup),
+		candidateHealth:    make(map[string]candidateHealth),
+		mediaIdleTimeout:   20 * time.Second,
 		client: &http.Client{
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
-					return dialer.DialContext(ctx, "tcp4", address)
+					return dialer.DialContext(ctx, dialNetwork, address)
 				},
 				DisableCompression:    true,
 				ForceAttemptHTTP2:     true,
@@ -282,7 +298,11 @@ func (s *server) handleMediaTargets(w http.ResponseWriter, r *http.Request, targ
 	}
 	w.WriteHeader(response.StatusCode)
 	if r.Method != http.MethodHead {
-		s.copyBody(w, response.Body, meta)
+		body := io.ReadCloser(response.Body)
+		if s.mediaIdleTimeout > 0 && response.StatusCode >= 200 && response.StatusCode < 400 {
+			body = newIdleTimeoutReadCloser(body, s.mediaIdleTimeout)
+		}
+		s.copyBody(w, body, meta)
 	}
 }
 
@@ -478,10 +498,15 @@ func (s *server) copyBody(w http.ResponseWriter, body io.Reader, meta *requestLo
 		defer s.metrics.streamFinished()
 	}
 	if _, err := io.CopyBuffer(w, body, *buffer); err != nil {
-		meta.errorStage = "response_stream"
-		if meta.ctx != nil && errors.Is(meta.ctx.Err(), context.Canceled) {
+		switch {
+		case errors.Is(err, errUpstreamIdleTimeout):
+			meta.errorStage = "upstream_idle"
+			meta.streamResult = "upstream_stall"
+		case meta.ctx != nil && errors.Is(meta.ctx.Err(), context.Canceled):
+			meta.errorStage = "response_stream"
 			meta.streamResult = "client_cancelled"
-		} else {
+		default:
+			meta.errorStage = "response_stream"
 			meta.streamResult = "error"
 		}
 		panic(http.ErrAbortHandler)

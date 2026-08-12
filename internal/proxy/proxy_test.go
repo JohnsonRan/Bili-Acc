@@ -236,6 +236,52 @@ func TestLikelyIPBoundCOSCandidateRequiresAllSignals(t *testing.T) {
 	}
 }
 
+func TestMediaGroupHealthRankingPrefersSuccessfulFastCandidate(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.now = func() time.Time { return now }
+	first := mustParseTestURL(t, "https://first.bilivideo.com/video.m4s")
+	second := mustParseTestURL(t, "https://second.bilivideo.com/video.m4s")
+	third := mustParseTestURL(t, "https://third.bilivideo.com/video.m4s")
+	app.recordCandidateSuccess(first, 400*time.Millisecond)
+	app.recordCandidateSuccess(second, 80*time.Millisecond)
+	app.recordCandidateFailure(third, http.StatusForbidden)
+
+	ordered := app.rankMediaCandidates([]*url.URL{first, third, second}, now)
+	got := []string{ordered[0].Hostname(), ordered[1].Hostname(), ordered[2].Hostname()}
+	want := []string{"second.bilivideo.com", "first.bilivideo.com", "third.bilivideo.com"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("candidate order=%v want=%v", got, want)
+	}
+}
+
+func TestMediaGroupHealthRankingNeverPromotesRiskyCOS(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.now = func() time.Time { return now }
+	safe := mustParseTestURL(t, "https://safe.bilivideo.com/video.m4s?gen=playurlv3&oi=1")
+	risky := mustParseTestURL(t, "https://fast-mirrorcosov.bilivideo.com/video.m4s?gen=playurlv3&oi=1")
+	app.recordCandidateSuccess(risky, time.Millisecond)
+	app.recordCandidateSuccess(safe, time.Second)
+	ordered := app.rankMediaCandidates([]*url.URL{risky, safe}, now)
+	if ordered[0].Hostname() != safe.Hostname() {
+		t.Fatalf("risky candidate promoted: %v", ordered)
+	}
+}
+
+func TestIdleTimeoutReadCloserStopsStalledBody(t *testing.T) {
+	body := &blockingReadCloser{closed: make(chan struct{})}
+	reader := newIdleTimeoutReadCloser(body, 10*time.Millisecond)
+	started := time.Now()
+	_, err := reader.Read(make([]byte, 1))
+	if !errors.Is(err, errUpstreamIdleTimeout) {
+		t.Fatalf("read error=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 10*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("idle timeout elapsed=%s", elapsed)
+	}
+}
+
 func TestMediaGroupRetriesUpstream403(t *testing.T) {
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
 	attempts := []string{}

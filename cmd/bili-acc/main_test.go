@@ -47,6 +47,13 @@ func TestEnvironmentParsersAndDurationBounds(t *testing.T) {
 	if _, err := envChoice("TEST_CHOICE", "masked", "full", "masked", "off"); err == nil {
 		t.Fatal("invalid choice accepted")
 	}
+
+	for _, value := range []string{"ipv4", "ipv6", "auto"} {
+		t.Setenv("TEST_NETWORK", value)
+		if got, err := envChoice("TEST_NETWORK", "ipv4", "ipv4", "ipv6", "auto"); err != nil || got != value {
+			t.Fatalf("network value=%q got=%q err=%v", value, got, err)
+		}
+	}
 }
 
 func TestLoggerConfigurationUsesExplicitLevels(t *testing.T) {
@@ -102,6 +109,8 @@ func TestComposeKeepsSingleProxyPortOnLoopback(t *testing.T) {
 	text := string(body)
 	for _, expected := range []string{
 		"LOG_CLIENT_IP: \"${LOG_CLIENT_IP:-masked}\"",
+		"UPSTREAM_NETWORK: \"${UPSTREAM_NETWORK:-ipv4}\"",
+		"MEDIA_IDLE_TIMEOUT: \"${MEDIA_IDLE_TIMEOUT:-20s}\"",
 		"127.0.0.1:8080:8080",
 	} {
 		if !strings.Contains(text, expected) {
