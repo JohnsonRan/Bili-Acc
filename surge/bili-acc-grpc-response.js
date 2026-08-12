@@ -2,7 +2,11 @@
   "use strict";
 
   const AKAMAI_SUFFIX = "akamaized.net";
-  const BILI_MEDIA_SUFFIXES = ["bilivideo.com", "bilivideo.cn", "biliapi.net"];
+  const argument = String($argument || "");
+  const separator = argument.indexOf("|");
+  const configuredServer = separator >= 0 ? argument.slice(0, separator) : "";
+  const token = separator >= 0 ? argument.slice(separator + 1) : "";
+  const server = configuredServer.replace(/\/$/, "");
   const SCHEMAS = {
     PlayViewUniteReply: {1: "VodInfo", 10: "FragmentVideo"},
     VodInfo: {5: "Stream"},
@@ -15,6 +19,12 @@
     DashVideo: {primary: 1, backup: 2},
     ResponseUrl: {primary: 4, backup: 5},
   };
+
+  if (!/^https:\/\/[^/]+$/i.test(server) || !token) {
+    log("skip reason=invalid_arguments");
+    $done({});
+    return;
+  }
 
   const responseHeaders = $response.headers || {};
   const rawTunnelStatus = getHeader(responseHeaders, "x-bili-acc-grpc-status").trim();
@@ -142,19 +152,14 @@
 
     const layout = URL_LAYOUTS[type];
     if (layout) {
-      const fallbackURLs = fields
-        .filter((field) => field.number === layout.backup && field.wireType === 2)
-        .map((field) => asciiURL(field.payload))
-        .filter((url) => isBiliMediaURL(url));
-      const fallback = fallbackURLs[0];
-      if (fallback) {
-        for (const field of fields) {
-          if (field.number !== layout.primary || field.wireType !== 2 || !isAkamaiURL(asciiURL(field.payload))) continue;
-          field.payload = asciiBytes(fallback);
-          field.changed = true;
-          changed = true;
-          rewritten++;
-        }
+      for (const field of fields) {
+        if (field.number !== layout.primary || field.wireType !== 2) continue;
+        const primary = asciiURL(field.payload);
+        if (!isAkamaiURL(primary)) continue;
+        field.payload = asciiBytes(proxyURL(primary));
+        field.changed = true;
+        changed = true;
+        rewritten++;
       }
     }
 
@@ -273,9 +278,26 @@
     return hostname === AKAMAI_SUFFIX || hostname.endsWith(`.${AKAMAI_SUFFIX}`);
   }
 
-  function isBiliMediaURL(value) {
-    const hostname = hostnameOf(value);
-    return BILI_MEDIA_SUFFIXES.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+  function proxyURL(value) {
+    const match = String(value).match(/^(https?:\/\/[^/]+)(\/.*)?$/i);
+    if (!match) return value;
+    return `${server}/proxy/${encodeURIComponent(token)}/${base64url(match[1])}${match[2] || "/"}`;
+  }
+
+  function base64url(value) {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let result = "";
+    for (let index = 0; index < value.length; index += 3) {
+      const first = value.charCodeAt(index);
+      const second = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+      const third = index + 2 < value.length ? value.charCodeAt(index + 2) : 0;
+      const block = (first << 16) | (second << 8) | third;
+      result += alphabet[(block >> 18) & 63];
+      result += alphabet[(block >> 12) & 63];
+      result += index + 1 < value.length ? alphabet[(block >> 6) & 63] : "=";
+      result += index + 2 < value.length ? alphabet[block & 63] : "=";
+    }
+    return result.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
   function concat(chunks) {

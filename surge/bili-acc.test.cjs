@@ -11,6 +11,7 @@ function runScript(name, globals) {
     URL,
     Uint8Array,
     console,
+    $argument: name === "bili-acc-grpc-response.js" ? "https://bili.example.com|test-token" : undefined,
     ...globals,
     $done(value = {}) {
       result = value;
@@ -187,7 +188,8 @@ test("gRPC response replaces Akamai URLs with Bilibili backup URLs", () => {
   });
 
   const rewritten = Buffer.from(result.body).toString("latin1");
-  assert.doesNotMatch(rewritten, /akamaized\.net/);
+  assert.doesNotMatch(rewritten, /video\.example\.akamaized\.net/);
+  assert.match(rewritten, /https:\/\/bili\.example\.com\/proxy\/test-token\/aHR0cHM6Ly92aWRlby5leGFtcGxlLmFrYW1haXplZC5uZXQ\/upgcxcode\/video\.m4s/);
   assert.match(rewritten, /upos-sz-mirrorali\.bilivideo\.com/);
   assert.equal(result.headers["Content-Length"], undefined);
   assert.equal(result.headers["X-Bili-Acc-Grpc-Status"], undefined);
@@ -196,7 +198,7 @@ test("gRPC response replaces Akamai URLs with Bilibili backup URLs", () => {
   assert.doesNotMatch(logs[0], /test-token|aHR0|deadline=|video\.m4s/);
 });
 
-test("gRPC response preserves upstream backup priority when replacing Akamai", () => {
+test("gRPC response proxies Akamai primary and preserves backup URLs", () => {
   const akamai = "https://video.example.akamaized.net/main.m4s";
   const preferred = "https://upos-sz-mirrorali.bilivideo.com/preferred.m4s";
   const later = "https://upos-sz-mirrorcosov.bilivideo.com/later.m4s";
@@ -211,7 +213,8 @@ test("gRPC response preserves upstream backup priority when replacing Akamai", (
     $response: {headers: {"Content-Type": "application/grpc"}, body: grpcFrame(reply)},
   });
   const rewritten = Buffer.from(result.body).toString("latin1");
-  assert.match(rewritten, /upos-sz-mirrorali\.bilivideo\.com\/preferred\.m4s/);
+  assert.match(rewritten, /https:\/\/bili\.example\.com\/proxy\/test-token\/aHR0cHM6Ly92aWRlby5leGFtcGxlLmFrYW1haXplZC5uZXQ\/main\.m4s/);
+  assert.equal(rewritten.match(/upos-sz-mirrorali\.bilivideo\.com\/preferred\.m4s/g)?.length, 1);
   assert.equal(rewritten.match(/upos-sz-mirrorcosov\.bilivideo\.com\/later\.m4s/g)?.length, 1);
 });
 
@@ -451,6 +454,7 @@ test("module declares native gRPC rewriting and scoped MITM hosts", () => {
   assert.equal(grpcPattern.test("https://app.bilibili.com/bilibili.pgc.gateway.player.v2.PlayURL/PlayView"), false);
   assert.match(grpcLine, /binary-body-mode=true/);
   assert.match(grpcLine, /engine=webview/);
+  assert.match(grpcLine, /argument="\{\{\{server\}\}\}\|\{\{\{token\}\}\}"/);
 
   const grpcRequestLine = scriptLines.find((line) => line.includes("bili-acc-grpc-request.js"));
   assert.match(grpcRequestLine, /type=http-request/);
