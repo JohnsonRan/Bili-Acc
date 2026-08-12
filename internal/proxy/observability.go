@@ -302,7 +302,8 @@ func (m *metricsStore) snapshot(now time.Time) diagnosticsSnapshot {
 	m.mu.Lock()
 	started := m.started
 	active := m.active
-	recentErrors := append([]recentError(nil), m.recentErrors...)
+	recentErrors := make([]recentError, len(m.recentErrors))
+	copy(recentErrors, m.recentErrors)
 	oneMinute := m.aggregateLocked(now, 60, false)
 	fiveMinutes := m.aggregateLocked(now, 5*60, false)
 	fifteenMinutes := m.aggregateLocked(now, metricWindowSeconds, true)

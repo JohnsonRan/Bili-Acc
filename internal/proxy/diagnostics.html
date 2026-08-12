@@ -190,16 +190,18 @@
     barList($('grpc'), grpc, grpc.reduce((sum, item) => sum + item[1], 0));
 
     const hosts = $('hosts'); hosts.replaceChildren();
-    if (!data.hosts.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = 5; cell.className = 'empty'; text(cell, 'No upstream hosts observed'); row.append(cell); hosts.append(row); }
-    data.hosts.forEach(host => {
+    const hostItems = Array.isArray(data.hosts) ? data.hosts : [];
+    if (!hostItems.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = 5; cell.className = 'empty'; text(cell, 'No upstream hosts observed'); row.append(cell); hosts.append(row); }
+    hostItems.forEach(host => {
       const row = document.createElement('tr');
       [host.host, host.requests, host.errors, host.status_403, pct(host.error_rate)].forEach((value, index) => { const cell = document.createElement('td'); text(cell, value); if (index > 1 && Number(host.errors) > 0) cell.className = 'danger'; row.append(cell); });
       hosts.append(row);
     });
 
     const errors = $('errors'); errors.replaceChildren();
-    if (!data.recent_errors.length) { const empty = document.createElement('div'); empty.className = 'empty'; text(empty, 'No errors recorded since startup'); errors.append(empty); }
-    [...data.recent_errors].reverse().forEach(error => {
+    const recentErrors = Array.isArray(data.recent_errors) ? data.recent_errors : [];
+    if (!recentErrors.length) { const empty = document.createElement('div'); empty.className = 'empty'; text(empty, 'No errors recorded since startup'); errors.append(empty); }
+    [...recentErrors].reverse().forEach(error => {
       const row = document.createElement('div'); row.className = 'error-row';
       const labels = ['Time', 'Route', 'Target host', 'HTTP / upstream', 'Result / gRPC'];
       const values = [new Date(error.time).toLocaleTimeString(), error.route, error.target_host || '—', `${error.status}/${error.upstream_status}`, error.grpc_status ? `${error.result} · grpc ${error.grpc_status}` : error.result];

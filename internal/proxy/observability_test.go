@@ -483,6 +483,9 @@ func TestDiagnosticsHandlerHTMLAPIAndSecurityHeaders(t *testing.T) {
 	if err := json.Unmarshal(api.Body.Bytes(), &snapshot); err != nil || snapshot.MetricsRetentionSeconds != metricWindowSeconds {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
+	if !strings.Contains(api.Body.String(), `"recent_errors":[]`) {
+		t.Fatalf("empty recent errors must be an array: %s", api.Body.String())
+	}
 	method := httptest.NewRecorder()
 	handler.ServeHTTP(method, httptest.NewRequest(http.MethodPost, "/diagnostics/api/snapshot", nil))
 	if method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != "GET, HEAD" {
