@@ -290,7 +290,7 @@ Surge 还需要：
 - 安装并信任 Surge CA；
 - 允许模块 MITM playurl API 和媒体 CDN 域名。
 
-网页端请求仍通过 `/playurl/` 响应改写。原生 App 的 `Player/PlayViewUnite` POST 请求会先改写到 Bili-Acc `/playurl-grpc/`，让 B 站按 VPS 出口生成媒体签名；随后 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求改写为 `/proxy/` 地址，并保留 `Range` 等流式请求头。
+网页端请求仍通过 `/playurl/` 响应改写。原生 App 的 `Player/PlayViewUnite` POST 请求会先改写到 Bili-Acc `/playurl-grpc/`，让 B 站按 VPS 出口生成媒体签名；随后 `bilivideo.com`、`bilivideo.cn` 或 `biliapi.net` 媒体请求改写为 `/proxy/` 地址，并保留 `Range` 等流式请求头。作为服务端兜底，`/proxy/` 在实际请求上游前也会将海外 COS/Huawei/Ali/AWS/Akamai 兼容组统一规范为 `upos-sz-mirrorali.bilivideo.com`，因此客户端即使仍提交 `mirrorcosov` 或 `mirrorhwov` URL，VPS 也不会直接访问这些节点。
 
 为避免对共享 CDN `*.akamaized.net` 做全域 MITM，模块只 MITM `grpc.biliapi.net`、`app.bilibili.com` 和 `app.biliapi.net` 的 `Player/PlayViewUnite` 原生播放请求与响应。请求脚本以 binary body mode 保存 protobuf 请求体，通过普通二进制 HTTP 隧道转发到 VPS，并声明 `grpc-accept-encoding: identity`。响应脚本按 PlayerUnite protobuf 字段结构处理视频、普通音频、Dolby、无损音频和分段流 URL，并参考 BiliUniverse Redirect 的 OverseaVideo 兼容分组，将海外 COS/Huawei/Ali/AWS/Akamai 地址统一规范到 Ali CDN 后包装为 Bili-Acc `/proxy/` URL；如果上游仍返回 gzip message frame，脚本会先解压、改写并重新输出未压缩 frame。未知压缩算法或没有 B 站备用地址时保持原样。主模块完全不声明 `akamaized.net` MITM。
 

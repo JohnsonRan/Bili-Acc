@@ -569,6 +569,46 @@ func TestPlayurlProxyRejectsOtherAPIs(t *testing.T) {
 	}
 }
 
+func TestMediaProxyNormalizesOverseaCDNBeforeFetching(t *testing.T) {
+	for _, sourceHost := range []string{
+		"upos-hz-mirrorakam.akamaized.net",
+		"upos-sz-mirrorawsov.bilivideo.com",
+		"upos-sz-mirroraliov.bilivideo.com",
+		"upos-sz-mirrorcosov.bilivideo.com",
+		"upos-sz-mirrorhwov.bilivideo.com",
+	} {
+		t.Run(sourceHost, func(t *testing.T) {
+			app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+			app.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Host != "upos-sz-mirrorali.bilivideo.com" || request.URL.Path != "/video.m4s" || request.URL.RawQuery != "oi=2582799872&upsig=secret" {
+					t.Fatalf("upstream target = %q", request.URL.String())
+				}
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header:     http.Header{"Content-Type": {"video/mp4"}},
+					Body:       io.NopCloser(strings.NewReader("ok")),
+					Request:    request,
+				}, nil
+			})
+			target := "https://" + sourceHost + "/video.m4s?oi=2582799872&upsig=secret"
+			request := httptest.NewRequest(http.MethodGet, proxyPath("/proxy/", testToken, target), nil)
+			response := httptest.NewRecorder()
+			app.ServeHTTP(response, request)
+			if response.Code != http.StatusPartialContent || response.Body.String() != "ok" {
+				t.Fatalf("response = %d %q", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestMediaProxyLeavesOtherCDNHostsUnchanged(t *testing.T) {
+	target, _ := url.Parse("https://d1--ov-gotcha207.bilivideo.com/video.m4s?deadline=1")
+	normalized, changed := normalizeOverseaMediaTarget(target)
+	if changed || normalized.String() != target.String() {
+		t.Fatalf("normalized unrelated target = %q changed=%t", normalized, changed)
+	}
+}
+
 func TestPlaylistRangeIsRemovedAndPartialResponseRejected(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Range"); got != "" {

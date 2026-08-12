@@ -204,6 +204,10 @@ func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Host not allowed", http.StatusForbidden)
 		return
 	}
+	if normalized, changed := normalizeOverseaMediaTarget(target); changed {
+		target = normalized
+		meta.targetHost = diagnosticHost(target.Hostname())
+	}
 
 	headers := copyRequestHeaders(r.Header, []string{
 		"Accept", "If-Modified-Since", "If-None-Match", "If-Range", "Range", "User-Agent",
