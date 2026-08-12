@@ -68,6 +68,15 @@ func proxyPath(prefix, token, target string) string {
 	return prefix + token + "/" + base64.RawURLEncoding.EncodeToString([]byte(origin)) + u.RequestURI()
 }
 
+func mustParseTestURL(t *testing.T, value string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
+}
+
 func TestNormalizePlayViewUniteRequestRemovesAdExtraAndPreservesUnknownFields(t *testing.T) {
 	vod := append([]byte{0x08, 0x7b}, protobufBytesField(99, []byte("unknown-vod"))...)
 	payload := append(protobufBytesField(1, vod), protobufBytesField(playViewUniteAdExtraField, []byte("client-ad-context"))...)
@@ -167,6 +176,63 @@ func TestMediaGroupRetriesConnectionErrorsAndUpstream5xx(t *testing.T) {
 	}
 	if got := strings.Join(attempts, ","); got != "first.bilivideo.com,second.bilivideo.com,third.bilivideo.com" {
 		t.Fatalf("attempts = %q", got)
+	}
+}
+
+func TestMediaGroupDeprioritizesLikelyIPBoundCOSCandidate(t *testing.T) {
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	urls := []*url.URL{
+		mustParseTestURL(t, "https://upos-sz-mirrorcosov.bilivideo.com/video.m4s?gen=playurlv3&oi=2582799872"),
+		mustParseTestURL(t, "https://upos-sz-mirrorali.bilivideo.com/video.m4s?gen=playurlv3&oi=2582799872"),
+		mustParseTestURL(t, "https://upos-hz-mirrorakam.akamaized.net/video.m4s?gen=playurlv3&oi=2582799872"),
+		mustParseTestURL(t, "https://upos-sz-mirrorcosov.bilivideo.com/legacy.m4s?gen=playurl&oi=2582799872"),
+	}
+	app.mediaGroups["0123456789abcdef0123456789abcdef"] = mediaGroup{URLs: urls, CreatedAt: app.now(), ExpiresAt: app.now().Add(time.Minute)}
+
+	candidates, ok := app.mediaGroupCandidates("0123456789abcdef0123456789abcdef", 0)
+	if !ok {
+		t.Fatal("media group not found")
+	}
+	got := make([]string, len(candidates))
+	for index, candidate := range candidates {
+		got[index] = candidate.Hostname() + candidate.Path
+	}
+	want := []string{
+		"upos-sz-mirrorali.bilivideo.com/video.m4s",
+		"upos-hz-mirrorakam.akamaized.net/video.m4s",
+		"upos-sz-mirrorcosov.bilivideo.com/legacy.m4s",
+		"upos-sz-mirrorcosov.bilivideo.com/video.m4s",
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("candidate order=%v want=%v", got, want)
+	}
+}
+
+func TestMediaGroupKeepsRiskyCandidatesWhenNoAlternativeExists(t *testing.T) {
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	first := mustParseTestURL(t, "https://first-mirrorcosov.bilivideo.com/first.m4s?gen=playurlv3&oi=1")
+	second := mustParseTestURL(t, "https://second-mirrorcosov.bilivideo.com/second.m4s?gen=playurlv3&oi=2")
+	app.mediaGroups["0123456789abcdef0123456789abcdef"] = mediaGroup{URLs: []*url.URL{first, second}, CreatedAt: app.now(), ExpiresAt: app.now().Add(time.Minute)}
+
+	candidates, ok := app.mediaGroupCandidates("0123456789abcdef0123456789abcdef", 1)
+	if !ok || len(candidates) != 2 || candidates[0].Hostname() != second.Hostname() || candidates[1].Hostname() != first.Hostname() {
+		t.Fatalf("candidates=%v ok=%v", candidates, ok)
+	}
+}
+
+func TestLikelyIPBoundCOSCandidateRequiresAllSignals(t *testing.T) {
+	for _, test := range []struct {
+		url  string
+		want bool
+	}{
+		{"https://upos-sz-mirrorcosov.bilivideo.com/video.m4s?gen=playurlv3&oi=2582799872", true},
+		{"https://upos-sz-mirrorcosov.bilivideo.com/video.m4s?gen=playurlv3", false},
+		{"https://upos-sz-mirrorcosov.bilivideo.com/video.m4s?gen=playurl&oi=2582799872", false},
+		{"https://upos-sz-mirrorali.bilivideo.com/video.m4s?gen=playurlv3&oi=2582799872", false},
+	} {
+		if got := likelyIPBoundCOSCandidate(mustParseTestURL(t, test.url)); got != test.want {
+			t.Fatalf("url=%s got=%v want=%v", test.url, got, test.want)
+		}
 	}
 }
 

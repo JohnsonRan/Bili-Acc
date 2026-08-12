@@ -161,10 +161,21 @@ func (s *server) mediaGroupCandidates(id string, preferred int) ([]*url.URL, boo
 	if !ok || preferred < 0 || preferred >= len(group.URLs) {
 		return nil, false
 	}
+	preferredCandidate := group.URLs[preferred]
 	ordered := make([]*url.URL, 0, len(group.URLs))
-	ordered = append(ordered, cloneURL(group.URLs[preferred]))
+	if !likelyIPBoundCOSCandidate(preferredCandidate) {
+		ordered = append(ordered, cloneURL(preferredCandidate))
+	}
 	for index, candidate := range group.URLs {
-		if index != preferred {
+		if index != preferred && !likelyIPBoundCOSCandidate(candidate) {
+			ordered = append(ordered, cloneURL(candidate))
+		}
+	}
+	if likelyIPBoundCOSCandidate(preferredCandidate) {
+		ordered = append(ordered, cloneURL(preferredCandidate))
+	}
+	for index, candidate := range group.URLs {
+		if index != preferred && likelyIPBoundCOSCandidate(candidate) {
 			ordered = append(ordered, cloneURL(candidate))
 		}
 	}
@@ -200,6 +211,14 @@ func newMediaGroupID() (string, error) {
 func cloneURL(value *url.URL) *url.URL {
 	cloned := *value
 	return &cloned
+}
+
+func likelyIPBoundCOSCandidate(candidate *url.URL) bool {
+	if candidate == nil || !strings.Contains(strings.ToLower(candidate.Hostname()), "mirrorcosov") {
+		return false
+	}
+	query := candidate.Query()
+	return strings.EqualFold(query.Get("gen"), "playurlv3") && query.Get("oi") != ""
 }
 
 func retryableMediaStatus(status int) bool {
