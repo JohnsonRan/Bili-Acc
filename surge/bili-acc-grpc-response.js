@@ -1,14 +1,6 @@
 (() => {
   "use strict";
 
-  const OVERSEA_MEDIA_HOSTS = new Set([
-    "upos-hz-mirrorakam.akamaized.net",
-    "upos-sz-mirrorawsov.bilivideo.com",
-    "upos-sz-mirroraliov.bilivideo.com",
-    "upos-sz-mirrorcosov.bilivideo.com",
-    "upos-sz-mirrorhwov.bilivideo.com",
-  ]);
-  const OVERSEA_TARGET_HOST = "upos-sz-mirrorali.bilivideo.com";
   const argument = String($argument || "");
   const separator = argument.indexOf("|");
   const configuredServer = separator >= 0 ? argument.slice(0, separator) : "";
@@ -70,7 +62,7 @@
   }
 
   const endpoint = safeEndpoint(String($request.url || ""));
-  log(`rewrite endpoint=${endpoint} frames=${result.frames} akamai_urls=${result.rewritten} decompressed_frames=${result.decompressed}`);
+  log(`rewrite endpoint=${endpoint} frames=${result.frames} media_urls=${result.rewritten} decompressed_frames=${result.decompressed}`);
   if (result.rewritten === 0 && result.decompressed === 0) {
     $done(tunnelStatus ? {headers} : {});
     return;
@@ -162,15 +154,13 @@
 
     const layout = URL_LAYOUTS[type];
     if (layout) {
-      const primaryField = fields.find((field) => field.number === layout.primary && field.wireType === 2 && isOverseaMediaURL(asciiURL(field.payload)));
-      if (primaryField) {
-        const proxiedPrimary = asciiBytes(proxyURL(normalizeOverseaURL(asciiURL(primaryField.payload))));
-        for (const field of fields) {
-          if ((field.number !== layout.primary && field.number !== layout.backup) || field.wireType !== 2) continue;
-          field.payload = proxiedPrimary;
-          field.changed = true;
-          changed = true;
-        }
+      for (const field of fields) {
+        if ((field.number !== layout.primary && field.number !== layout.backup) || field.wireType !== 2) continue;
+        const mediaURL = asciiURL(field.payload);
+        if (!isMediaURL(mediaURL)) continue;
+        field.payload = asciiBytes(proxyURL(mediaURL));
+        field.changed = true;
+        changed = true;
         rewritten++;
       }
     }
@@ -280,17 +270,8 @@
     return Uint8Array.from(String(value), (character) => character.charCodeAt(0));
   }
 
-  function hostnameOf(value) {
-    const match = String(value || "").match(/^https?:\/\/([^/:?#]+)/i);
-    return match ? match[1].toLowerCase() : "";
-  }
-
-  function isOverseaMediaURL(value) {
-    return OVERSEA_MEDIA_HOSTS.has(hostnameOf(value));
-  }
-
-  function normalizeOverseaURL(value) {
-    return String(value).replace(/^(https?:\/\/)[^/:?#]+/i, `$1${OVERSEA_TARGET_HOST}`);
+  function isMediaURL(value) {
+    return /^https?:\/\/[^/]+\//i.test(String(value));
   }
 
   function proxyURL(value) {
