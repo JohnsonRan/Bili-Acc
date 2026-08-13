@@ -52,10 +52,7 @@
     .metric { grid-column: span 4; padding: 20px; min-height: 132px; display: flex; flex-direction: column; justify-content: space-between; }
     .metric strong { font: 800 clamp(27px, 4vw, 45px)/1 "Courier New", monospace; letter-spacing: -.06em; }
     .metric small { color: var(--muted); }
-    .windows { grid-column: span 7; padding: 22px; }
-    .qualities { grid-column: span 5; padding: 22px; }
-    .qualities .signal-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .qualities .status-item { grid-template-columns: max-content 1fr auto; }
+    .windows { grid-column: 1 / -1; padding: 22px; }
     .statuses { grid-column: 1 / -1; padding: 22px; }
     .signal-columns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
     .hosts, .errors { grid-column: 1 / -1; padding: 22px; overflow: hidden; }
@@ -88,7 +85,7 @@
     footer { margin-top: 18px; color: var(--muted); display: flex; justify-content: space-between; font: 11px "Courier New", monospace; }
     @media (max-width: 920px) {
       .metric { grid-column: span 6; }
-      .windows, .qualities, .statuses { grid-column: 1 / -1; }
+      .windows, .statuses { grid-column: 1 / -1; }
       .signal-columns { grid-template-columns: 1fr; }
       .error-row { grid-template-columns: 110px 95px minmax(150px, 1fr) 90px minmax(130px, 1fr); }
     }
@@ -97,11 +94,10 @@
       header { align-items: start; flex-direction: column; }
       .metric { grid-column: 1 / -1; min-height: 108px; }
       .section-head { align-items: flex-start; }
-      .qualities .signal-columns { grid-template-columns: 1fr; }
       .live-edge { align-items: flex-end; flex-direction: column; gap: 3px; }
       .window-row { grid-template-columns: 42px 1fr 62px 70px; }
       .window-row .latency { display: none; }
-      .hosts, .errors, .windows, .qualities, .statuses { padding: 17px; border-radius: 14px; }
+      .hosts, .errors, .windows, .statuses { padding: 17px; border-radius: 14px; }
       table { min-width: 620px; }
       .hosts { overflow-x: auto; }
       .error-row { grid-template-columns: 1fr 1fr; gap: 12px 16px; padding: 14px 2px; }
@@ -130,13 +126,6 @@
     <article class="panel windows">
       <div class="section-head"><h2>Rolling windows</h2><div class="live-edge"><strong id="live-edge">LIVE EDGE ACTIVE</strong><small id="live-detail">latest 3 complete segments</small></div></div>
       <div id="windows"></div>
-    </article>
-    <article class="panel qualities">
-      <div class="section-head"><h2>Playurl quality</h2><span>JSON responses · 15m</span></div>
-      <div class="signal-columns">
-        <section><div class="section-head"><h2>Video</h2><span>reported current quality</span></div><div id="video-qualities" class="status-list"></div></section>
-        <section><div class="section-head"><h2>Live</h2><span>reported current quality</span></div><div id="live-qualities" class="status-list"></div></section>
-      </div>
     </article>
     <article class="panel statuses">
       <div class="signal-columns">
@@ -221,12 +210,6 @@
       row.append(name, track, success, latency, issues); windows.append(row);
     });
 
-    const renderQualities = (id, values) => {
-      const entries = Object.entries(values || {}).sort((a,b) => b[1]-a[1]);
-      barList($(id), entries, entries.reduce((sum, item) => sum + item[1], 0));
-    };
-    renderQualities('video-qualities', fifteen.video_qualities);
-    renderQualities('live-qualities', fifteen.live_qualities);
     const statuses = Object.entries(fifteen.statuses || {}).sort((a,b) => b[1]-a[1]);
     barList($('statuses'), statuses, fifteen.requests);
     const grpc = Object.entries(data.grpc_statuses || {}).sort((a,b) => b[1]-a[1]);

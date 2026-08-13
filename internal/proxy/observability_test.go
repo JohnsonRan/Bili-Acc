@@ -328,17 +328,6 @@ func TestCandidateSelectionMetricsTrackRecoveryAndExhaustion(t *testing.T) {
 	}
 }
 
-func TestPlayurlQualityMetricsSeparateVideoAndLiveLabels(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	metrics := newMetricsStore(now)
-	metrics.record(requestObservation{Time: now, Route: "playurl", Result: "ok", PlayurlKind: "video", ActualQuality: 116, QualityLabel: "1080P60"})
-	metrics.record(requestObservation{Time: now, Route: "playurl", Result: "ok", PlayurlKind: "live", ActualQuality: 10000, QualityLabel: "原画 1080P60"})
-	window := metrics.snapshot(now).Windows["15m"]
-	if window.VideoQualities["1080P60"] != 1 || window.LiveQualities["原画 1080P60"] != 1 {
-		t.Fatalf("quality metrics=%+v", window)
-	}
-}
-
 func TestFailedUpstreamAttemptDoesNotRecordHeaderLatency(t *testing.T) {
 	var logs bytes.Buffer
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
@@ -520,7 +509,7 @@ func TestDiagnosticsHandlerHTMLAPIAndSecurityHeaders(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("page status=%d body=%q", page.Code, page.Body.String())
 	}
-	for _, expected := range []string{"Signal Room", "Active streams", "Playback stalls", "15m traffic", "Fallback health", "LIVE EDGE ACTIVE", "latest 3 complete segments", "Playurl quality", "JSON responses", "Video", "Live", "reported current quality", "video_qualities", "live_qualities", "Request mix", "Rolling windows", "CDN and upstream hosts", "Stalls", "gRPC trailers", "Recent sanitized errors", "rel=\"icon\" href=\"data:,\"", "scope=\"col\"", "aria-live=\"polite\"", "data-label", "HTTP / upstream", "Result / gRPC", "@media (max-width: 560px)"} {
+	for _, expected := range []string{"Signal Room", "Active streams", "Playback stalls", "15m traffic", "Fallback health", "LIVE EDGE ACTIVE", "latest 3 complete segments", "Request mix", "Rolling windows", "CDN and upstream hosts", "Stalls", "gRPC trailers", "Recent sanitized errors", "rel=\"icon\" href=\"data:,\"", "scope=\"col\"", "aria-live=\"polite\"", "data-label", "HTTP / upstream", "Result / gRPC", "@media (max-width: 560px)"} {
 		if !strings.Contains(page.Body.String(), expected) {
 			t.Fatalf("diagnostics page missing %q", expected)
 		}

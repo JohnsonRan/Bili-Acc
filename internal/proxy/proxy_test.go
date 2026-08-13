@@ -839,27 +839,6 @@ func TestSummarizeLivePlayurlQuality(t *testing.T) {
 	}
 }
 
-func TestLivePlayurlQualityDescriptionDrivesMetrics(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"code":0,"data":{"playurl_info":{"playurl":{"current_qn":10000,"accept_qn":[30000,10000],"quality_description":[{"qn":30000,"desc":"杜比"},{"qn":10000,"desc":"原画 1080P60"}]}}}}`)
-	}))
-	defer upstream.Close()
-
-	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
-	app.client.Transport = transportTo(upstream)
-	request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id=1"), nil)
-	response := httptest.NewRecorder()
-	app.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
-	}
-	window := app.metrics.snapshot(app.now()).Windows["1m"]
-	if window.LiveQualities["原画 1080P60"] != 1 || window.LiveQualities["杜比"] != 0 {
-		t.Fatalf("live qualities=%v", window.LiveQualities)
-	}
-}
-
 func TestLivePlayurlDisablesCaching(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Cache-Control") != "no-cache" || r.Header.Get("Pragma") != "no-cache" {
@@ -930,9 +909,6 @@ func TestPlayurlResponseRegistersFallbackGroupsAndLogsActualQuality(t *testing.T
 		if strings.Contains(logged, secret) {
 			t.Fatalf("log leaked %q: %q", secret, logged)
 		}
-	}
-	if got := app.metrics.snapshot(app.now()).Windows["1m"].VideoQualities["QN 120"]; got != 1 {
-		t.Fatalf("video quality count = %d", got)
 	}
 }
 

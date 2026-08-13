@@ -146,7 +146,6 @@ type metricBucket struct {
 	Statuses           [600]uint64
 	GRPCStatuses       [grpcStatusSlots]uint64
 	Routes             map[string]uint64
-	PlayurlQualities   map[string]uint64
 	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
 	Hosts              map[string]hostCounters
 }
@@ -164,18 +163,6 @@ func newMetricsStore(now time.Time) *metricsStore {
 		started:      now,
 		recentErrors: make([]recentError, 0, maxRecentErrors),
 	}
-}
-
-func playurlQualityLabel(observation requestObservation) string {
-	label := boundedToken(observation.QualityLabel, 48)
-	if label == "" {
-		label = "QN " + strconv.Itoa(observation.ActualQuality)
-	}
-	kind := observation.PlayurlKind
-	if kind != "live" {
-		kind = "video"
-	}
-	return kind + "\x00" + label
 }
 
 func (m *metricsStore) record(observation requestObservation) {
@@ -209,9 +196,6 @@ func (m *metricsStore) record(observation requestObservation) {
 	}
 	if observation.Route == "playurl_grpc" && observation.GRPCStatus != "" {
 		bucket.GRPCStatuses[grpcStatusIndex(observation.GRPCStatus)]++
-	}
-	if observation.Route == "playurl" && observation.ActualQuality > 0 {
-		bucket.PlayurlQualities[playurlQualityLabel(observation)]++
 	}
 	if observation.UpstreamHeaderObserved {
 		bucket.LatencyBuckets[latencyBucketIndex(observation.UpstreamHeaderMS)]++
@@ -307,16 +291,13 @@ func (m *metricsStore) bucketLocked(second int64) *metricBucket {
 	}
 	bucket := &m.buckets[index]
 	if bucket.Second != second {
-		*bucket = metricBucket{Second: second, Hosts: make(map[string]hostCounters), Routes: make(map[string]uint64), PlayurlQualities: make(map[string]uint64)}
+		*bucket = metricBucket{Second: second, Hosts: make(map[string]hostCounters), Routes: make(map[string]uint64)}
 	} else {
 		if bucket.Hosts == nil {
 			bucket.Hosts = make(map[string]hostCounters)
 		}
 		if bucket.Routes == nil {
 			bucket.Routes = make(map[string]uint64)
-		}
-		if bucket.PlayurlQualities == nil {
-			bucket.PlayurlQualities = make(map[string]uint64)
 		}
 	}
 	return bucket
@@ -360,8 +341,6 @@ type windowSnapshot struct {
 	PlaylistTrims       int            `json:"playlist_trims"`
 	SegmentsSkipped     int            `json:"segments_skipped"`
 	PlaylistTrimErrors  int            `json:"playlist_trim_errors"`
-	VideoQualities      map[string]int `json:"video_qualities"`
-	LiveQualities       map[string]int `json:"live_qualities"`
 	Routes              map[string]int `json:"routes"`
 	Statuses            map[string]int `json:"statuses"`
 	UpstreamHeaderP50MS int64          `json:"upstream_header_p50_ms"`
@@ -409,7 +388,6 @@ type metricAggregate struct {
 	Statuses           [600]uint64
 	GRPCStatuses       [grpcStatusSlots]uint64
 	Routes             map[string]uint64
-	PlayurlQualities   map[string]uint64
 	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
 	Hosts              map[string]hostCounters
 }
@@ -458,7 +436,7 @@ func (m *metricsStore) window(now time.Time, duration time.Duration) windowSnaps
 }
 
 func (m *metricsStore) aggregateLocked(now time.Time, seconds int, includeHosts bool) metricAggregate {
-	aggregate := metricAggregate{Routes: make(map[string]uint64), PlayurlQualities: make(map[string]uint64)}
+	aggregate := metricAggregate{Routes: make(map[string]uint64)}
 	if includeHosts {
 		aggregate.Hosts = make(map[string]hostCounters)
 	}
@@ -492,9 +470,6 @@ func (m *metricsStore) aggregateLocked(now time.Time, seconds int, includeHosts 
 		}
 		for route, count := range bucket.Routes {
 			aggregate.Routes[route] += count
-		}
-		for quality, count := range bucket.PlayurlQualities {
-			aggregate.PlayurlQualities[quality] += count
 		}
 		for latency, count := range bucket.LatencyBuckets {
 			aggregate.LatencyBuckets[latency] += count
@@ -538,25 +513,12 @@ func windowFromAggregate(aggregate metricAggregate) windowSnapshot {
 		PlaylistTrims:      int(aggregate.PlaylistTrims),
 		SegmentsSkipped:    int(aggregate.SegmentsSkipped),
 		PlaylistTrimErrors: int(aggregate.PlaylistTrimErrors),
-		VideoQualities:     make(map[string]int),
-		LiveQualities:      make(map[string]int),
 		Routes:             make(map[string]int),
 		Statuses:           make(map[string]int),
 	}
 	denominator := aggregate.Success + aggregate.Failed
 	if denominator > 0 {
 		window.SuccessRate = float64(aggregate.Success) * 100 / float64(denominator)
-	}
-	for quality, count := range aggregate.PlayurlQualities {
-		kind, label, ok := strings.Cut(quality, "\x00")
-		if !ok {
-			continue
-		}
-		if kind == "live" {
-			window.LiveQualities[label] += int(count)
-		} else {
-			window.VideoQualities[label] += int(count)
-		}
 	}
 	for route, count := range aggregate.Routes {
 		window.Routes[route] = int(count)
