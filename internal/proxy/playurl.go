@@ -113,18 +113,28 @@ func summarizePlayurl(root any) playurlSummary {
 	codecSet := make(map[string]bool)
 	walkJSON(root, func(object map[string]any) {
 		if summary.Quality == 0 {
-			summary.Quality = jsonInt(object["quality"])
+			for _, key := range []string{"quality", "current_qn", "qn"} {
+				if summary.Quality = jsonInt(object[key]); summary.Quality > 0 {
+					break
+				}
+			}
 		}
 		if summary.AcceptQualities == "" {
-			if values, ok := object["accept_quality"].([]any); ok {
-				summary.AcceptQualities = joinJSONInts(values)
+			for _, key := range []string{"accept_quality", "accept_qn"} {
+				if values, ok := object[key].([]any); ok {
+					summary.AcceptQualities = joinJSONInts(values)
+					break
+				}
 			}
 		}
 		if id := jsonInt(object["id"]); id > 0 && hasMediaURL(object) {
 			qualitySet[id] = true
 		}
-		if codec, ok := object["codecs"].(string); ok && codec != "" && hasMediaURL(object) {
-			codecSet[boundedToken(codec, 32)] = true
+		for _, key := range []string{"codecs", "codec_name"} {
+			if codec, ok := object[key].(string); ok && codec != "" && hasMediaURL(object) {
+				codecSet[boundedToken(codec, 32)] = true
+				break
+			}
 		}
 	})
 	summary.VideoQualities = joinSortedInts(qualitySet)

@@ -827,6 +827,18 @@ func TestLivePlayurlRequestsHighestQuality(t *testing.T) {
 	}
 }
 
+func TestSummarizeLivePlayurlQuality(t *testing.T) {
+	var root any
+	body := `{"code":0,"data":{"playurl_info":{"playurl":{"current_qn":10000,"accept_qn":[10000,400,250],"stream":[{"protocol_name":"http_hls","format":[{"format_name":"fmp4","codec":[{"codec_name":"av1","current_qn":10000,"base_url":"/live/index.m3u8","url_info":[{"host":"https://live.bilivideo.com","extra":"?qn=10000"}]}]}]}]}}}}`
+	if err := json.Unmarshal([]byte(body), &root); err != nil {
+		t.Fatal(err)
+	}
+	summary := summarizePlayurl(root)
+	if summary.Quality != 10000 || summary.AcceptQualities != "10000,400,250" || summary.VideoCodecs != "av1" {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
 func TestLivePlayurlDisablesCaching(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Cache-Control") != "no-cache" || r.Header.Get("Pragma") != "no-cache" {
@@ -1168,8 +1180,26 @@ func TestLivePlaylistKeepsLatestCompleteSegments(t *testing.T) {
 	}
 }
 
-func TestNonSlidingPlaylistsAreNotTrimmed(t *testing.T) {
-	for _, marker := range []string{"#EXT-X-ENDLIST", "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-BYTERANGE:100", "#EXT-X-MAP:URI=\"init.mp4\""} {
+func TestFMP4LivePlaylistKeepsMapAndLatestSegments(t *testing.T) {
+	body := "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-START:TIME-OFFSET=0\n#EXT-X-MEDIA-SEQUENCE:119413416\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.m4s\"\n#EXT-BILI-AUX:one\n#EXTINF:1.00,\n119413416.m4s\n#EXT-BILI-AUX:two\n#EXTINF:1.00,\n119413417.m4s\n#EXT-BILI-AUX:three\n#EXTINF:1.00,\n119413418.m4s\n#EXT-BILI-AUX:four\n#EXTINF:1.00,\n119413419.m4s\n#EXT-BILI-AUX:five\n#EXTINF:1.00,\n119413420.m4s\n"
+	trimmed, result := trimLivePlaylist(body, 3)
+	if !result.Live || !result.Trimmed || result.Skipped != 2 || result.Malformed {
+		t.Fatalf("result = %+v", result)
+	}
+	for _, expected := range []string{"#EXT-X-MAP:URI=\"init.m4s\"", "#EXT-X-MEDIA-SEQUENCE:119413418", "#EXT-BILI-AUX:three", "119413418.m4s", "119413419.m4s", "119413420.m4s"} {
+		if !strings.Contains(trimmed, expected) {
+			t.Fatalf("trimmed playlist missing %q: %q", expected, trimmed)
+		}
+	}
+	for _, removed := range []string{"#EXT-X-START:", "#EXT-BILI-AUX:one", "#EXT-BILI-AUX:two", "119413416.m4s", "119413417.m4s"} {
+		if strings.Contains(trimmed, removed) {
+			t.Fatalf("trimmed playlist retained %q: %q", removed, trimmed)
+		}
+	}
+}
+
+func TestUnsafePlaylistsAreNotTrimmed(t *testing.T) {
+	for _, marker := range []string{"#EXT-X-ENDLIST", "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-BYTERANGE:100", "#EXT-X-MAP:URI=\"init-a.mp4\"\n#EXT-X-MAP:URI=\"init-b.mp4\"", "#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\""} {
 		body := "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n" + marker + "\n#EXTINF:4,\n1.ts\n#EXTINF:4,\n2.ts\n#EXTINF:4,\n3.ts\n#EXTINF:4,\n4.ts\n"
 		trimmed, result := trimLivePlaylist(body, 3)
 		if trimmed != body || result.Live || result.Trimmed {

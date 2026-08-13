@@ -60,6 +60,9 @@
     .section-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
     .section-head h2 { margin: 0; font: 700 24px Georgia, serif; }
     .section-head span { color: var(--muted); font: 12px "Courier New", monospace; }
+    .live-edge { display: flex; align-items: center; gap: 9px; text-align: right; }
+    .live-edge strong { color: var(--good); font: 800 11px "Courier New", monospace; letter-spacing: .08em; }
+    .live-edge small { color: var(--muted); font: 11px "Courier New", monospace; }
     .window-row { display: grid; grid-template-columns: 55px 1fr 76px 90px 92px; gap: 12px; align-items: center; margin: 16px 0; }
     .track { height: 13px; background: #dedbd1; border-radius: 20px; overflow: hidden; }
     .fill { height: 100%; background: linear-gradient(90deg, var(--good), #4cac89); border-radius: inherit; transition: width .45s ease; }
@@ -91,6 +94,8 @@
       main { width: min(100% - 22px, 1440px); padding-top: 28px; }
       header { align-items: start; flex-direction: column; }
       .metric { grid-column: 1 / -1; min-height: 108px; }
+      .section-head { align-items: flex-start; }
+      .live-edge { align-items: flex-end; flex-direction: column; gap: 3px; }
       .window-row { grid-template-columns: 42px 1fr 62px 70px; }
       .window-row .latency { display: none; }
       .hosts, .errors, .windows, .qualities, .statuses { padding: 17px; border-radius: 14px; }
@@ -118,10 +123,9 @@
     <article class="panel metric"><span class="label">Playback stalls</span><strong id="stalls">—</strong><small id="stall-detail">no stalls or 403s</small></article>
     <article class="panel metric"><span class="label">15m traffic</span><strong id="traffic">—</strong><small id="media-count">no media requests</small></article>
     <article class="panel metric"><span class="label">Fallback health</span><strong id="fallback-rate">—</strong><small id="recovery-count">no fallback activity</small></article>
-    <article class="panel metric"><span class="label">Live edge mode</span><strong id="live-edge">ACTIVE</strong><small id="live-detail">latest 3 complete segments</small></article>
 
     <article class="panel windows">
-      <div class="section-head"><h2>Rolling windows</h2><span>completion-based</span></div>
+      <div class="section-head"><h2>Rolling windows</h2><div class="live-edge"><strong id="live-edge">LIVE EDGE ACTIVE</strong><small id="live-detail">latest 3 complete segments</small></div></div>
       <div id="windows"></div>
     </article>
     <article class="panel qualities">
@@ -197,7 +201,7 @@
     const fallbackRate = fifteen.fallbacks ? fifteen.fallback_recoveries / fifteen.fallbacks * 100 : 0;
     text($('fallback-rate'), fifteen.fallbacks ? pct(fallbackRate) : '—');
     text($('recovery-count'), `${fifteen.candidate_attempts || 0} attempts · ${fifteen.candidate_exhausted || 0} exhausted`);
-    text($('live-edge'), fifteen.playlist_trim_errors ? 'CHECK' : 'ACTIVE');
+    text($('live-edge'), fifteen.playlist_trim_errors ? 'LIVE EDGE CHECK' : 'LIVE EDGE ACTIVE');
     text($('live-detail'), `${fifteen.live_playlists || 0} playlists · ${fifteen.playlist_trims || 0} trims · ${fifteen.segments_skipped || 0} skipped${fifteen.playlist_trim_errors ? ` · ${fifteen.playlist_trim_errors} errors` : ''}`);
 
     const windows = $('windows'); windows.replaceChildren();
@@ -211,7 +215,7 @@
       row.append(name, track, success, latency, issues); windows.append(row);
     });
 
-    const qualities = {127:'8K',126:'Dolby',125:'HDR',120:'4K',116:'1080P60',80:'1080P',64:'720P'};
+    const qualities = {10000:'Original',400:'Blu-ray',250:'Ultra HD',150:'HD',80:'1080P',64:'720P',127:'8K',126:'Dolby',125:'HDR',120:'4K',116:'1080P60'};
     const qualityEntries = Object.entries(fifteen.actual_qualities || {}).sort((a,b) => b[1]-a[1]).map(([key,value]) => [qualities[key] || `QN ${key}`, value]);
     barList($('qualities'), qualityEntries, qualityEntries.reduce((sum, item) => sum + item[1], 0));
     const statuses = Object.entries(fifteen.statuses || {}).sort((a,b) => b[1]-a[1]);

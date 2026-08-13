@@ -69,11 +69,22 @@ func trimLivePlaylist(body string, keep int) (string, playlistTrimResult) {
 		return body, result
 	}
 	lines := strings.Split(body, "\n")
+	mapCount := 0
+	hasKey := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "#EXT-X-ENDLIST" || trimmed == "#EXT-X-PLAYLIST-TYPE:EVENT" || strings.HasPrefix(trimmed, "#EXT-X-MAP:") || strings.HasPrefix(trimmed, "#EXT-X-BYTERANGE:") {
+		if trimmed == "#EXT-X-ENDLIST" || trimmed == "#EXT-X-PLAYLIST-TYPE:EVENT" || strings.HasPrefix(trimmed, "#EXT-X-BYTERANGE:") {
 			return body, result
 		}
+		if strings.HasPrefix(trimmed, "#EXT-X-MAP:") {
+			mapCount++
+		}
+		if strings.HasPrefix(trimmed, "#EXT-X-KEY:") {
+			hasKey = true
+		}
+	}
+	if mapCount > 1 || mapCount == 1 && hasKey {
+		return body, result
 	}
 
 	type segment struct{ start, extinf, uri int }
@@ -118,6 +129,7 @@ func trimLivePlaylist(body string, keep int) (string, playlistTrimResult) {
 	retainedStart := segments[skipped].start
 	prefix := append([]string(nil), lines[:firstStart]...)
 	prefix = carryActivePlaylistTags(prefix, lines[firstStart:removedEnd])
+	prefix = removePlaylistTag(prefix, "#EXT-X-START:")
 	prefix = advancePlaylistSequence(prefix, "#EXT-X-MEDIA-SEQUENCE:", skipped)
 
 	discontinuities := 0
@@ -140,7 +152,7 @@ func firstSegmentTag(lines []string, extinf int) int {
 	start := extinf
 	for start > 0 {
 		trimmed := strings.TrimSpace(lines[start-1])
-		if trimmed == "" || trimmed == "#EXT-X-DISCONTINUITY" || strings.HasPrefix(trimmed, "#EXT-X-KEY:") || strings.HasPrefix(trimmed, "#EXT-X-PROGRAM-DATE-TIME:") || strings.HasPrefix(trimmed, "#EXT-X-DATERANGE:") || strings.HasPrefix(trimmed, "#EXT-X-GAP") {
+		if trimmed == "" || trimmed == "#EXT-X-DISCONTINUITY" || strings.HasPrefix(trimmed, "#EXT-X-KEY:") || strings.HasPrefix(trimmed, "#EXT-X-PROGRAM-DATE-TIME:") || strings.HasPrefix(trimmed, "#EXT-X-DATERANGE:") || strings.HasPrefix(trimmed, "#EXT-X-GAP") || strings.HasPrefix(trimmed, "#EXT-BILI-AUX:") {
 			start--
 			continue
 		}
@@ -174,6 +186,16 @@ func carryActivePlaylistTags(prefix, removed []string) []string {
 		}
 	}
 	return prefix
+}
+
+func removePlaylistTag(lines []string, tag string) []string {
+	filtered := lines[:0]
+	for _, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), tag) {
+			filtered = append(filtered, line)
+		}
+	}
+	return filtered
 }
 
 func advancePlaylistSequence(lines []string, tag string, delta int) []string {
