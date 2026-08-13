@@ -73,7 +73,7 @@
     return groups;
   };
 
-  const registerMediaGroups = async (groups) => {
+  const registerMediaGroups = async (groups, signal) => {
     if (groups.length === 0 || !nativeFetch) return [];
     try {
       const response = await nativeFetch(`${SERVER.replace(/\/$/, "")}/media-groups/${encodeURIComponent(TOKEN)}`, {
@@ -81,11 +81,13 @@
         headers: {"Content-Type": "application/json"},
         body: root.JSON.stringify({groups: groups.map((group) => ({urls: group.urls}))}),
         credentials: "omit",
+        signal,
       });
       if (!response.ok) return [];
       const parsed = await response.json();
       return Array.isArray(parsed.ids) && parsed.ids.length === groups.length ? parsed.ids.map(String) : [];
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       return [];
     }
   };
@@ -133,9 +135,9 @@
   };
 
   const nativeParse = root.JSON.parse;
-  const rewriteAsync = async (value) => {
+  const rewriteAsync = async (value, signal) => {
     const groups = collectMediaGroups(value);
-    const ids = await registerMediaGroups(groups);
+    const ids = await registerMediaGroups(groups, signal);
     return rewrite(value, ids.map((id, index) => ({...groups[index], id})));
   };
 
@@ -209,11 +211,15 @@
   };
 
   const proxiedFetchResponses = new WeakSet();
+  const proxiedFetchSignals = new WeakMap();
   const nativeClone = root.Response?.prototype.clone;
   if (nativeClone) {
     root.Response.prototype.clone = function (...args) {
       const cloned = nativeClone.apply(this, args);
-      if (proxiedFetchResponses.has(this)) proxiedFetchResponses.add(cloned);
+      if (proxiedFetchResponses.has(this)) {
+        proxiedFetchResponses.add(cloned);
+        proxiedFetchSignals.set(cloned, proxiedFetchSignals.get(this));
+      }
       return cloned;
     };
   }
@@ -237,6 +243,7 @@
         referrerPolicy: effectiveRequest.referrerPolicy,
       }));
       proxiedFetchResponses.add(response);
+      proxiedFetchSignals.set(response, effectiveRequest.signal);
       return response;
     };
   }
@@ -262,7 +269,7 @@
   if (nativeJson) {
     root.Response.prototype.json = async function (...args) {
       const parsed = await nativeJson.apply(this, args);
-      return proxiedFetchResponses.has(this) ? rewriteAsync(parsed) : parsed;
+      return proxiedFetchResponses.has(this) ? rewriteAsync(parsed, proxiedFetchSignals.get(this)) : parsed;
     };
   }
   const nativeText = root.Response?.prototype.text;
@@ -270,9 +277,11 @@
     root.Response.prototype.text = async function (...args) {
       const text = await nativeText.apply(this, args);
       if (!proxiedFetchResponses.has(this)) return text;
+      const signal = proxiedFetchSignals.get(this);
       try {
-        return root.JSON.stringify(await rewriteAsync(nativeParse(text)));
-      } catch {
+        return root.JSON.stringify(await rewriteAsync(nativeParse(text), signal));
+      } catch (error) {
+        if (signal?.aborted) throw error;
         return rewriteJSONText(text);
       }
     };

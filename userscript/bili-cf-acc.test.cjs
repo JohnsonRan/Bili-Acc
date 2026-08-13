@@ -57,6 +57,11 @@ function loadScript(options = {}) {
       fetchCalls.push({ input, init });
       const url = input instanceof Request ? input.url : String(input);
       if (url.includes("/media-groups/")) {
+        if (options.pendingRegistration) {
+          return new Promise((resolve, reject) => {
+            init.signal.addEventListener("abort", () => reject(init.signal.reason), {once: true});
+          });
+        }
         return new RootResponse('{"ids":["0123456789abcdef0123456789abcdef"]}', {status: 200, headers: {"content-type": "application/json"}});
       }
       const playurlBody = options.backupFirst
@@ -149,6 +154,19 @@ test("rewrites cloned playurl responses", async () => {
   assert.match(json.data.url, /^https:\/\/bili\.example\.com\/proxy\//);
   const text = await response.clone().text();
   assert.match(text, /https:\/\/bili\.example\.com\/proxy\//);
+});
+
+test("aborts media group registration when a part switch cancels playurl", async () => {
+  const { root, fetchCalls } = loadScript({pendingRegistration: true});
+  const controller = new AbortController();
+  const response = await root.fetch("https://api.bilibili.com/x/player/playurl?cid=1", {signal: controller.signal});
+  const parsed = response.json();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(fetchCalls[1].init.signal.aborted, false);
+  controller.abort();
+  await assert.rejects(parsed, {name: "AbortError"});
+  assert.equal(fetchCalls[1].init.signal.aborted, true);
 });
 
 test("preserves Request options and leaves unrelated fetch responses alone", async () => {
