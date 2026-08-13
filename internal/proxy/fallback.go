@@ -100,27 +100,34 @@ func (s *server) handleMediaGroupRegistration(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	ids, err := s.registerMediaGroups(groups)
+	if err != nil {
+		requestLogFrom(r).errorStage = "registration"
+		http.Error(w, "registration failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(mediaGroupRegistrationResponse{IDs: ids})
+}
+
+func (s *server) registerMediaGroups(groups [][]*url.URL) ([]string, error) {
 	ids := make([]string, len(groups))
 	now := s.now()
 	s.mediaGroupMu.Lock()
+	defer s.mediaGroupMu.Unlock()
 	s.pruneMediaGroupsLocked(now)
 	for index, candidates := range groups {
 		id, err := newMediaGroupID()
 		if err != nil {
-			s.mediaGroupMu.Unlock()
-			requestLogFrom(r).errorStage = "registration"
-			http.Error(w, "registration failed", http.StatusInternalServerError)
-			return
+			return nil, err
 		}
 		ids[index] = id
 		s.mediaGroups[id] = mediaGroup{URLs: candidates, CreatedAt: now, ExpiresAt: now.Add(mediaGroupTTL)}
 	}
 	s.pruneMediaGroupsLocked(now)
-	s.mediaGroupMu.Unlock()
-
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(mediaGroupRegistrationResponse{IDs: ids})
+	return ids, nil
 }
 
 func (s *server) handleMediaGroup(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +243,19 @@ func likelyIPBoundCOSCandidate(candidate *url.URL) bool {
 	return strings.EqualFold(query.Get("gen"), "playurlv3") && query.Get("oi") != ""
 }
 
+func likelyP2PCandidate(candidate *url.URL) bool {
+	if candidate == nil {
+		return false
+	}
+	host := strings.ToLower(candidate.Hostname())
+	for _, marker := range []string{"302ppio", "302kodo", ".mcdn.bilivideo", "szbdyd.com", ".nexusedgeio.com", ".ahdohpiechei.com"} {
+		if strings.Contains(host, marker) {
+			return true
+		}
+	}
+	return strings.EqualFold(candidate.Query().Get("os"), "mcdn")
+}
+
 func retryableMediaStatus(status int) bool {
 	return status == http.StatusForbidden || status == http.StatusRequestTimeout || status == http.StatusTooEarly || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 }
@@ -284,20 +304,27 @@ func (s *server) rankMediaCandidates(candidates []*url.URL, now time.Time) []*ur
 		index    int
 		health   candidateHealth
 		observed bool
-		risky    bool
+		risk     int
 	}
 	ranked := make([]rankedCandidate, len(candidates))
 	s.candidateMu.Lock()
 	s.pruneCandidateHealthLocked(now)
 	for index, candidate := range candidates {
 		health, ok := s.candidateHealth[candidateHealthKey(candidate)]
-		ranked[index] = rankedCandidate{url: candidate, index: index, health: health, observed: ok, risky: likelyIPBoundCOSCandidate(candidate)}
+		risk := 0
+		if likelyP2PCandidate(candidate) {
+			risk = 1
+		}
+		if likelyIPBoundCOSCandidate(candidate) {
+			risk = 2
+		}
+		ranked[index] = rankedCandidate{url: candidate, index: index, health: health, observed: ok, risk: risk}
 	}
 	s.candidateMu.Unlock()
 	sort.SliceStable(ranked, func(i, j int) bool {
 		left, right := ranked[i], ranked[j]
-		if left.risky != right.risky {
-			return !left.risky
+		if left.risk != right.risk {
+			return left.risk < right.risk
 		}
 		leftPenalized := left.health.PenalizedUntil.After(now)
 		rightPenalized := right.health.PenalizedUntil.After(now)

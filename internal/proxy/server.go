@@ -70,6 +70,11 @@ type requestLog struct {
 	upstreamHeaderObserved bool
 	streamResult           string
 	qualityParams          string
+	actualQuality          int
+	acceptQualities        string
+	videoQualities         string
+	videoCodecs            string
+	mediaGroups            int
 	grpcStatus             string
 	errorStage             string
 }
@@ -485,10 +490,41 @@ func (s *server) handlePlayurl(w http.ResponseWriter, r *http.Request) {
 	defer response.Body.Close()
 	meta.upstreamStatus = response.StatusCode
 	copyResponseHeaders(w.Header(), response.Header)
-	w.WriteHeader(response.StatusCode)
-	if r.Method != http.MethodHead {
-		s.copyBody(w, response.Body, meta)
+	if r.Method == http.MethodHead || response.StatusCode != http.StatusOK || !strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "json") {
+		w.WriteHeader(response.StatusCode)
+		if r.Method != http.MethodHead {
+			s.copyBody(w, response.Body, meta)
+		}
+		return
 	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxPlayurlResponseSize+1))
+	if err != nil {
+		meta.errorStage = "playurl_response"
+		http.Error(w, "Invalid playurl response", http.StatusBadGateway)
+		return
+	}
+	if len(body) > maxPlayurlResponseSize {
+		w.WriteHeader(response.StatusCode)
+		s.copyBody(w, io.MultiReader(bytes.NewReader(body), response.Body), meta)
+		return
+	}
+	rewritten, summary, err := s.rewritePlayurlResponse(body)
+	if err != nil {
+		rewritten = body
+	}
+	meta.actualQuality = summary.Quality
+	meta.acceptQualities = summary.AcceptQualities
+	meta.videoQualities = summary.VideoQualities
+	meta.videoCodecs = summary.VideoCodecs
+	meta.mediaGroups = summary.MediaGroups
+	w.Header().Del("Content-Length")
+	w.WriteHeader(response.StatusCode)
+	if _, err := w.Write(rewritten); err != nil {
+		meta.errorStage = "response_stream"
+		meta.streamResult = "error"
+		panic(http.ErrAbortHandler)
+	}
+	meta.streamResult = "complete"
 }
 
 func (s *server) copyBody(w http.ResponseWriter, body io.Reader, meta *requestLog) {

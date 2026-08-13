@@ -827,6 +827,77 @@ func TestLivePlayurlRequestsHighestQuality(t *testing.T) {
 	}
 }
 
+func TestPlayurlResponseRegistersFallbackGroupsAndLogsActualQuality(t *testing.T) {
+	upstreamBody := `{"code":0,"data":{"quality":120,"accept_quality":[127,120,80],"dash":{"video":[{"id":120,"codecs":"hev1.1.6.L150.90","baseUrl":"https://upos-sz-mirrorali.bilivideo.com/video.m4s?sig=1","backupUrl":["https://upos-sz-302ppio.bilivideo.com/video.m4s?sig=2"]},{"id":80,"codecs":"avc1.640032","baseUrl":"https://cdn.bilivideo.com/1080.m4s?sig=3"}]}}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, upstreamBody)
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.logger = testLogger(&logs)
+	app.client.Transport = transportTo(upstream)
+	request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, "https://api.bilibili.com/x/player/playurl?cid=1"), nil)
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	var parsed struct {
+		Data struct {
+			Dash struct {
+				Video []struct {
+					BaseURL   string   `json:"baseUrl"`
+					BackupURL []string `json:"backupUrl"`
+				} `json:"video"`
+			} `json:"dash"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	first := parsed.Data.Dash.Video[0]
+	if !strings.Contains(first.BaseURL, "/proxy-group/") || !strings.HasSuffix(first.BaseURL, "/0") || len(first.BackupURL) != 1 || !strings.HasSuffix(first.BackupURL[0], "/1") {
+		t.Fatalf("rewritten group = %+v", first)
+	}
+	if got := parsed.Data.Dash.Video[1].BaseURL; got != "https://cdn.bilivideo.com/1080.m4s?sig=3" {
+		t.Fatalf("single candidate rewritten = %q", got)
+	}
+	logged := logs.String()
+	for _, expected := range []string{"actual_quality=120", "accept_quality=127,120,80", "video_qualities=120,80", "video_codecs=avc1.640032,hev1.1.6.L150.90", "media_groups=1"} {
+		if !strings.Contains(logged, expected) {
+			t.Fatalf("log missing %q: %q", expected, logged)
+		}
+	}
+	for _, secret := range []string{"sig=1", "sig=2", "video.m4s"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("log leaked %q: %q", secret, logged)
+		}
+	}
+	if got := app.metrics.snapshot(app.now()).Windows["1m"].ActualQualities["120"]; got != 1 {
+		t.Fatalf("actual quality count = %d", got)
+	}
+}
+
+func TestCandidateRankingDeprioritizesP2PCDN(t *testing.T) {
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	candidates := []*url.URL{
+		mustParseTestURL(t, "https://upos-sz-302ppio.bilivideo.com/video.m4s"),
+		mustParseTestURL(t, "https://cdn.bilivideo.com/video.m4s"),
+		mustParseTestURL(t, "https://node.mcdn.bilivideo.cn/video.m4s"),
+		mustParseTestURL(t, "https://upos-sz-mirrorcosov.bilivideo.com/video.m4s?gen=playurlv3&oi=1"),
+	}
+	ordered := app.rankMediaCandidates(candidates, time.Now())
+	if got := ordered[0].Hostname(); got != "cdn.bilivideo.com" {
+		t.Fatalf("first candidate = %q", got)
+	}
+	if !likelyP2PCandidate(ordered[1]) || !likelyP2PCandidate(ordered[2]) || !likelyIPBoundCOSCandidate(ordered[3]) {
+		t.Fatalf("candidate order = %v", ordered)
+	}
+}
+
 func TestTransportUsesControlledIPv4Egress(t *testing.T) {
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
 	transport := app.client.Transport.(*http.Transport)

@@ -57,7 +57,9 @@ Bili-Acc 是使用 Go 编写的 B 站固定出口媒体代理。它将 playurl A
   - `/xlive/web-room/v2/index/getRoomPlayInfo`
   - `/room/v1/Room/playUrl`
 - WBI 请求重新签名，并缓存 WBI mixin key 一小时。
-- 视频请求使用 `qn=127`、`fnval=4048` 和 `fourk=1` 请求最高可用画质。
+- 视频请求使用 `qn=127`、`fnval=4048`、`fourk=1` 和高画质兼容 User-Agent 请求最高可用画质。
+- 服务端记录上游实际 `quality`、可选画质、DASH 视频画质/编码，在诊断快照中汇总实际画质分布，并将同一媒体项的主备 URL 直接注册和改写为 `/proxy-group/`。
+- 候选排序会降低常见 PCDN/MCDN 地址优先级，但不修改上游签名 URL 的 hostname。
 - 直播新版请求使用 `qn=10000`，旧版请求使用 `quality=4`。
 - HLS playlist 最大读取 4 MiB，读取和改写阶段最长 30 秒。
 - 普通媒体不设置全局响应超时，避免长视频流被固定时限中断。
@@ -275,7 +277,7 @@ const TOKEN = "replace-with-the-same-token-as-the-server";
 3. 授权 `GM_cookie`，以读取包括 HttpOnly 在内的 B 站登录 Cookie。
 4. 刷新 B 站页面并开始播放。
 
-脚本会在 `document-start` 阶段拦截网页端 GET playurl 请求，将 Cookie 放入 `X-Bili-Cookie`，并改写 fetch JSON/text、XHR response/responseText 以及页面初始 `__playinfo__`/直播状态中的媒体 URL，避免首次打开后必须切换清晰度才生效。可异步等待的 fetch JSON/text 会把同一 DASH 项的主/备用签名 URL 注册为后端 fallback 组；同步 XHR getter 和页面初始变量无法等待注册，因此继续使用逐 URL `/proxy/`，由播放器自身执行备用切换。Cookie 在脚本内缓存 15 秒，不会由服务端持久化。
+脚本会在 `document-start` 阶段拦截网页端 GET playurl 请求，将 Cookie 放入 `X-Bili-Cookie`，并改写 fetch JSON/text、XHR response/responseText 以及页面初始 `__playinfo__`/直播状态中的媒体 URL，避免首次打开后必须切换清晰度才生效。服务端已优先将 playurl JSON 中同一媒体项的主/备用签名 URL 注册并改写为 `/proxy-group/`；脚本保留响应改写作为旧服务端、非标准响应和页面初始变量的兼容回退。Cookie 在脚本内缓存 15 秒，不会由服务端持久化。
 
 ### Surge
 
@@ -325,7 +327,7 @@ Token 位于代理 URL 路径中，因此以下位置可能看到完整请求路
 
 应用使用标准库 `slog` 输出结构化事件，不记录完整 URL、查询参数、Token、Cookie、Authorization、原始 gRPC metadata 或 `grpc-message`。默认不逐条记录成功的媒体 `200/206` 请求，健康检查和 `OPTIONS` 也保持静默；playurl 与原生 gRPC 成功请求仍会记录。HTTP 失败、非零 gRPC status 和真实流错误会立即记录，相同的安全错误键在去重周期内只输出一次，并在下一次输出 `repeats_suppressed`。每个非空汇总周期输出一条 `traffic_summary`，包括请求数、成功/失败、流量、活动流、客户端取消、403 和上游响应头 p95。
 
-客户端主动退出、拖动或切换清晰度导致的中断计为 `client_cancelled`，不写入常规逐请求日志，也不与真实 `stream_error` 混淆；诊断页成功率的分子和分母都会排除这些取消请求。playurl 日志中的 `quality_params=upgraded|failed|unchanged|not_attempted` 表示最高画质请求参数处理状态，不代表响应最终提供的实际画质。若启用 Caddy access log，应对 `/playurl/`、`/playurl-grpc/` 和 `/proxy/` 路径脱敏，或关闭不必要的访问日志。
+客户端主动退出、拖动或切换清晰度导致的中断计为 `client_cancelled`，不写入常规逐请求日志，也不与真实 `stream_error` 混淆；诊断页成功率的分子和分母都会排除这些取消请求。playurl 日志中的 `quality_params=upgraded|failed|unchanged|not_attempted` 表示最高画质请求参数处理状态；`actual_quality`、`accept_quality`、`video_qualities`、`video_codecs` 和 `media_groups` 表示上游实际响应及服务端注册结果，不包含媒体 URL 或签名参数。若启用 Caddy access log，应对 `/playurl/`、`/playurl-grpc/` 和 `/proxy/` 路径脱敏，或关闭不必要的访问日志。
 
 ### 上游连接
 

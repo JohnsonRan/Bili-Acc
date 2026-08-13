@@ -97,6 +97,11 @@ type requestObservation struct {
 	Range                  bool
 	StreamResult           string
 	QualityParams          string
+	ActualQuality          int
+	AcceptQualities        string
+	VideoQualities         string
+	VideoCodecs            string
+	MediaGroups            int
 	GRPCStatus             string
 }
 
@@ -134,6 +139,7 @@ type metricBucket struct {
 	Bytes              uint64
 	Statuses           [600]uint64
 	GRPCStatuses       [grpcStatusSlots]uint64
+	ActualQualities    map[int]uint64
 	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
 	Hosts              map[string]hostCounters
 }
@@ -183,6 +189,9 @@ func (m *metricsStore) record(observation requestObservation) {
 	}
 	if observation.Route == "playurl_grpc" && observation.GRPCStatus != "" {
 		bucket.GRPCStatuses[grpcStatusIndex(observation.GRPCStatus)]++
+	}
+	if observation.Route == "playurl" && observation.ActualQuality > 0 {
+		bucket.ActualQualities[observation.ActualQuality]++
 	}
 	if observation.UpstreamHeaderObserved {
 		bucket.LatencyBuckets[latencyBucketIndex(observation.UpstreamHeaderMS)]++
@@ -261,9 +270,14 @@ func (m *metricsStore) bucketLocked(second int64) *metricBucket {
 	}
 	bucket := &m.buckets[index]
 	if bucket.Second != second {
-		*bucket = metricBucket{Second: second, Hosts: make(map[string]hostCounters)}
-	} else if bucket.Hosts == nil {
-		bucket.Hosts = make(map[string]hostCounters)
+		*bucket = metricBucket{Second: second, Hosts: make(map[string]hostCounters), ActualQualities: make(map[int]uint64)}
+	} else {
+		if bucket.Hosts == nil {
+			bucket.Hosts = make(map[string]hostCounters)
+		}
+		if bucket.ActualQualities == nil {
+			bucket.ActualQualities = make(map[int]uint64)
+		}
 	}
 	return bucket
 }
@@ -302,6 +316,7 @@ type windowSnapshot struct {
 	Fallbacks           int            `json:"fallbacks"`
 	FallbackRecoveries  int            `json:"fallback_recoveries"`
 	CandidateExhausted  int            `json:"candidate_exhausted"`
+	ActualQualities     map[string]int `json:"actual_qualities"`
 	Statuses            map[string]int `json:"statuses"`
 	UpstreamHeaderP50MS int64          `json:"upstream_header_p50_ms"`
 	UpstreamHeaderP95MS int64          `json:"upstream_header_p95_ms"`
@@ -343,6 +358,7 @@ type metricAggregate struct {
 	Bytes              uint64
 	Statuses           [600]uint64
 	GRPCStatuses       [grpcStatusSlots]uint64
+	ActualQualities    map[int]uint64
 	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
 	Hosts              map[string]hostCounters
 }
@@ -391,7 +407,7 @@ func (m *metricsStore) window(now time.Time, duration time.Duration) windowSnaps
 }
 
 func (m *metricsStore) aggregateLocked(now time.Time, seconds int, includeHosts bool) metricAggregate {
-	aggregate := metricAggregate{}
+	aggregate := metricAggregate{ActualQualities: make(map[int]uint64)}
 	if includeHosts {
 		aggregate.Hosts = make(map[string]hostCounters)
 	}
@@ -418,6 +434,9 @@ func (m *metricsStore) aggregateLocked(now time.Time, seconds int, includeHosts 
 		}
 		for status, count := range bucket.GRPCStatuses {
 			aggregate.GRPCStatuses[status] += count
+		}
+		for quality, count := range bucket.ActualQualities {
+			aggregate.ActualQualities[quality] += count
 		}
 		for latency, count := range bucket.LatencyBuckets {
 			aggregate.LatencyBuckets[latency] += count
@@ -457,11 +476,15 @@ func windowFromAggregate(aggregate metricAggregate) windowSnapshot {
 		Fallbacks:          int(aggregate.Fallbacks),
 		FallbackRecoveries: int(aggregate.FallbackRecoveries),
 		CandidateExhausted: int(aggregate.CandidateExhausted),
+		ActualQualities:    make(map[string]int),
 		Statuses:           make(map[string]int),
 	}
 	denominator := aggregate.Success + aggregate.Failed
 	if denominator > 0 {
 		window.SuccessRate = float64(aggregate.Success) * 100 / float64(denominator)
+	}
+	for quality, count := range aggregate.ActualQualities {
+		window.ActualQualities[strconv.Itoa(quality)] = int(count)
 	}
 	for status, count := range aggregate.Statuses {
 		if count > 0 {
@@ -606,6 +629,11 @@ func (s *server) completeRequest(r *http.Request, writer *loggingResponseWriter,
 		Range:                  r.Header.Get("Range") != "",
 		StreamResult:           streamResult,
 		QualityParams:          qualityParams,
+		ActualQuality:          meta.actualQuality,
+		AcceptQualities:        boundedToken(meta.acceptQualities, 128),
+		VideoQualities:         boundedToken(meta.videoQualities, 128),
+		VideoCodecs:            boundedToken(meta.videoCodecs, 128),
+		MediaGroups:            meta.mediaGroups,
 		GRPCStatus:             sanitizeGRPCStatus(meta.grpcStatus),
 	}
 	observation.Result = classifyResult(observation)
@@ -684,6 +712,21 @@ func (s *server) logRequest(observation requestObservation, remote string) {
 	}
 	if observation.Route == "playurl" {
 		attributes = append(attributes, "quality_params", observation.QualityParams)
+		if observation.ActualQuality > 0 {
+			attributes = append(attributes, "actual_quality", observation.ActualQuality)
+		}
+		if observation.AcceptQualities != "" {
+			attributes = append(attributes, "accept_quality", observation.AcceptQualities)
+		}
+		if observation.VideoQualities != "" {
+			attributes = append(attributes, "video_qualities", observation.VideoQualities)
+		}
+		if observation.VideoCodecs != "" {
+			attributes = append(attributes, "video_codecs", observation.VideoCodecs)
+		}
+		if observation.MediaGroups > 0 {
+			attributes = append(attributes, "media_groups", observation.MediaGroups)
+		}
 	}
 	if observation.Route == "playurl_grpc" {
 		attributes = append(attributes, "grpc_status", valueOrUnknown(observation.GRPCStatus))
