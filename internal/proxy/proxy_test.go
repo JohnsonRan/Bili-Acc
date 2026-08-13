@@ -626,6 +626,9 @@ func TestGRPCPlayurlProxyEnforcesResponseSizeLimit(t *testing.T) {
 func TestPlayurlRequestsHighestQualityWithoutChangingResponseMetadata(t *testing.T) {
 	upstreamBody := `{"code":0,"data":{"quality":80,"accept_quality":[127,120,80]}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != qualityUserAgent {
+			t.Errorf("User-Agent = %q", got)
+		}
 		query := r.URL.Query()
 		for name, expected := range map[string]string{"qn": "127", "fnver": "0", "fnval": "4048", "fourk": "1"} {
 			if got := query.Get(name); got != expected {

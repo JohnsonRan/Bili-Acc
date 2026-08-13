@@ -21,6 +21,7 @@ const (
 	videoFunctionValue  = "4048"
 	liveHighestQuality  = "10000"
 	legacyLiveQuality   = "4"
+	qualityUserAgent    = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
 	maxNavResponseSize  = 1 << 20
 	wbiKeyTTL           = time.Hour
 )

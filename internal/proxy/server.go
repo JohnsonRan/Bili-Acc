@@ -450,6 +450,7 @@ func (s *server) handlePlayurl(w http.ResponseWriter, r *http.Request) {
 		referer = "https://www.bilibili.com/"
 	}
 	headers.Set("Referer", referer)
+	headers.Set("User-Agent", qualityUserAgent)
 	if parsed, err := url.Parse(referer); err == nil && parsed.Scheme != "" && parsed.Host != "" {
 		headers.Set("Origin", parsed.Scheme+"://"+parsed.Host)
 	}
