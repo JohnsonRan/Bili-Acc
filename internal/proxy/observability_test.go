@@ -39,7 +39,7 @@ func TestSuccessfulMediaIsSilentAndCountsAcceptedBodyBytes(t *testing.T) {
 		t.Fatalf("successful media log = %q", logs.String())
 	}
 	snapshot := app.metrics.snapshot(now)
-	if snapshot.Windows["1m"].Requests != 1 || snapshot.Windows["1m"].Bytes != int64(len("payload")) || snapshot.ThroughputBPS == 0 {
+	if snapshot.Windows["1m"].Requests != 1 || snapshot.Windows["1m"].Routes["media"] != 1 || snapshot.Windows["1m"].Bytes != int64(len("payload")) || snapshot.ThroughputBPS == 0 {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 }
@@ -509,7 +509,7 @@ func TestDiagnosticsHandlerHTMLAPIAndSecurityHeaders(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("page status=%d body=%q", page.Code, page.Body.String())
 	}
-	for _, expected := range []string{"Signal Room", "Active streams", "Playback stalls", "recovered", "Rolling windows", "CDN and upstream hosts", "Stalls", "gRPC trailers", "Recent sanitized errors", "rel=\"icon\" href=\"data:,\"", "scope=\"col\"", "aria-live=\"polite\"", "data-label", "HTTP / upstream", "Result / gRPC", "@media (max-width: 560px)"} {
+	for _, expected := range []string{"Signal Room", "Active streams", "Playback stalls", "15m traffic", "Fallback health", "Live edge mode", "latest 3 complete segments", "Delivered quality", "Request mix", "Rolling windows", "CDN and upstream hosts", "Stalls", "gRPC trailers", "Recent sanitized errors", "rel=\"icon\" href=\"data:,\"", "scope=\"col\"", "aria-live=\"polite\"", "data-label", "HTTP / upstream", "Result / gRPC", "@media (max-width: 560px)"} {
 		if !strings.Contains(page.Body.String(), expected) {
 			t.Fatalf("diagnostics page missing %q", expected)
 		}

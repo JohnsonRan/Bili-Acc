@@ -236,9 +236,13 @@ func (s *server) handleMediaTargets(w http.ResponseWriter, r *http.Request, targ
 	headers := copyRequestHeaders(r.Header, []string{
 		"Accept", "If-Modified-Since", "If-None-Match", "If-Range", "Range", "User-Agent",
 	})
-	if isPlaylist("", targets[0].Path) {
+	if isPlaylist(r.Header.Get("Accept"), targets[0].Path) {
+		headers.Del("If-Modified-Since")
+		headers.Del("If-None-Match")
 		headers.Del("If-Range")
 		headers.Del("Range")
+		headers.Set("Cache-Control", "no-cache")
+		headers.Set("Pragma", "no-cache")
 	}
 	headers.Set("Referer", "https://www.bilibili.com/")
 
@@ -281,16 +285,19 @@ func (s *server) handleMediaTargets(w http.ResponseWriter, r *http.Request, targ
 			http.Error(w, "PUBLIC_URL is required for playlists", http.StatusBadGateway)
 			return
 		}
-		rewritten, err := s.rewritePlaylist(string(body), finalURL, s.publicURL)
+		trimmed, trimResult := trimLivePlaylist(string(body), livePlaylistSegments)
+		s.metrics.recordPlaylist(s.now(), trimResult)
+		rewritten, err := s.rewritePlaylist(trimmed, finalURL, s.publicURL)
 		if err != nil {
 			meta.errorStage = "playlist"
 			http.Error(w, "Invalid playlist URL", http.StatusBadGateway)
 			return
 		}
 		copyResponseHeaders(w.Header(), response.Header)
-		for _, name := range []string{"Accept-Ranges", "Content-Encoding", "Content-Length", "Content-Md5", "Content-Range", "Digest", "Etag", "Last-Modified"} {
+		for _, name := range []string{"Accept-Ranges", "Age", "Content-Encoding", "Content-Length", "Content-Md5", "Content-Range", "Digest", "Etag", "Expires", "Last-Modified"} {
 			w.Header().Del(name)
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		enableMediaByteMetrics(w, s)
 		w.WriteHeader(http.StatusOK)
 		s.copyBody(w, strings.NewReader(rewritten), meta)
@@ -456,6 +463,10 @@ func (s *server) handlePlayurl(w http.ResponseWriter, r *http.Request) {
 	}
 	headers.Set("Referer", referer)
 	headers.Set("User-Agent", qualityUserAgent)
+	if isLivePlayurlPath(target.Path) {
+		headers.Set("Cache-Control", "no-cache")
+		headers.Set("Pragma", "no-cache")
+	}
 	if parsed, err := url.Parse(referer); err == nil && parsed.Scheme != "" && parsed.Host != "" {
 		headers.Set("Origin", parsed.Scheme+"://"+parsed.Host)
 	}
@@ -490,6 +501,11 @@ func (s *server) handlePlayurl(w http.ResponseWriter, r *http.Request) {
 	defer response.Body.Close()
 	meta.upstreamStatus = response.StatusCode
 	copyResponseHeaders(w.Header(), response.Header)
+	if isLivePlayurlPath(target.Path) {
+		w.Header().Del("Age")
+		w.Header().Del("Expires")
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	if r.Method == http.MethodHead || response.StatusCode != http.StatusOK || !strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "json") {
 		w.WriteHeader(response.StatusCode)
 		if r.Method != http.MethodHead {

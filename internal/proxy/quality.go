@@ -33,6 +33,10 @@ var mixinKeyEncTable = [...]int{
 	22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 }
 
+func isLivePlayurlPath(path string) bool {
+	return path == "/xlive/web-room/v2/index/getRoomPlayInfo" || path == "/room/v1/Room/playUrl"
+}
+
 func (s *server) highestQualityTarget(ctx context.Context, target *url.URL, headers http.Header) (*url.URL, bool, error) {
 	upgraded := *target
 	query := upgraded.Query()

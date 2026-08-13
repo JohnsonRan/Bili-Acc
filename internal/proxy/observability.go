@@ -136,9 +136,14 @@ type metricBucket struct {
 	Fallbacks          uint64
 	FallbackRecoveries uint64
 	CandidateExhausted uint64
+	LivePlaylists      uint64
+	PlaylistTrims      uint64
+	SegmentsSkipped    uint64
+	PlaylistTrimErrors uint64
 	Bytes              uint64
 	Statuses           [600]uint64
 	GRPCStatuses       [grpcStatusSlots]uint64
+	Routes             map[string]uint64
 	ActualQualities    map[int]uint64
 	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
 	Hosts              map[string]hostCounters
@@ -168,6 +173,7 @@ func (m *metricsStore) record(observation requestObservation) {
 	if observation.Route == "media" {
 		bucket.MediaRequests++
 	}
+	bucket.Routes[observation.Route]++
 	switch observation.Result {
 	case "client_cancelled":
 		bucket.Cancelled++
@@ -253,6 +259,23 @@ func (m *metricsStore) recordCandidateSelection(now time.Time, attempts int, rec
 	m.mu.Unlock()
 }
 
+func (m *metricsStore) recordPlaylist(now time.Time, result playlistTrimResult) {
+	if !result.Live {
+		return
+	}
+	m.mu.Lock()
+	bucket := m.bucketLocked(now.Unix())
+	bucket.LivePlaylists++
+	if result.Trimmed {
+		bucket.PlaylistTrims++
+		bucket.SegmentsSkipped += uint64(result.Skipped)
+	}
+	if result.Malformed {
+		bucket.PlaylistTrimErrors++
+	}
+	m.mu.Unlock()
+}
+
 func (m *metricsStore) addMediaBytes(now time.Time, count int64) {
 	if count <= 0 {
 		return
@@ -270,10 +293,13 @@ func (m *metricsStore) bucketLocked(second int64) *metricBucket {
 	}
 	bucket := &m.buckets[index]
 	if bucket.Second != second {
-		*bucket = metricBucket{Second: second, Hosts: make(map[string]hostCounters), ActualQualities: make(map[int]uint64)}
+		*bucket = metricBucket{Second: second, Hosts: make(map[string]hostCounters), Routes: make(map[string]uint64), ActualQualities: make(map[int]uint64)}
 	} else {
 		if bucket.Hosts == nil {
 			bucket.Hosts = make(map[string]hostCounters)
+		}
+		if bucket.Routes == nil {
+			bucket.Routes = make(map[string]uint64)
 		}
 		if bucket.ActualQualities == nil {
 			bucket.ActualQualities = make(map[int]uint64)
@@ -316,7 +342,12 @@ type windowSnapshot struct {
 	Fallbacks           int            `json:"fallbacks"`
 	FallbackRecoveries  int            `json:"fallback_recoveries"`
 	CandidateExhausted  int            `json:"candidate_exhausted"`
+	LivePlaylists       int            `json:"live_playlists"`
+	PlaylistTrims       int            `json:"playlist_trims"`
+	SegmentsSkipped     int            `json:"segments_skipped"`
+	PlaylistTrimErrors  int            `json:"playlist_trim_errors"`
 	ActualQualities     map[string]int `json:"actual_qualities"`
+	Routes              map[string]int `json:"routes"`
 	Statuses            map[string]int `json:"statuses"`
 	UpstreamHeaderP50MS int64          `json:"upstream_header_p50_ms"`
 	UpstreamHeaderP95MS int64          `json:"upstream_header_p95_ms"`
@@ -355,9 +386,14 @@ type metricAggregate struct {
 	Fallbacks          uint64
 	FallbackRecoveries uint64
 	CandidateExhausted uint64
+	LivePlaylists      uint64
+	PlaylistTrims      uint64
+	SegmentsSkipped    uint64
+	PlaylistTrimErrors uint64
 	Bytes              uint64
 	Statuses           [600]uint64
 	GRPCStatuses       [grpcStatusSlots]uint64
+	Routes             map[string]uint64
 	ActualQualities    map[int]uint64
 	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
 	Hosts              map[string]hostCounters
@@ -407,7 +443,7 @@ func (m *metricsStore) window(now time.Time, duration time.Duration) windowSnaps
 }
 
 func (m *metricsStore) aggregateLocked(now time.Time, seconds int, includeHosts bool) metricAggregate {
-	aggregate := metricAggregate{ActualQualities: make(map[int]uint64)}
+	aggregate := metricAggregate{Routes: make(map[string]uint64), ActualQualities: make(map[int]uint64)}
 	if includeHosts {
 		aggregate.Hosts = make(map[string]hostCounters)
 	}
@@ -428,12 +464,19 @@ func (m *metricsStore) aggregateLocked(now time.Time, seconds int, includeHosts 
 		aggregate.Fallbacks += bucket.Fallbacks
 		aggregate.FallbackRecoveries += bucket.FallbackRecoveries
 		aggregate.CandidateExhausted += bucket.CandidateExhausted
+		aggregate.LivePlaylists += bucket.LivePlaylists
+		aggregate.PlaylistTrims += bucket.PlaylistTrims
+		aggregate.SegmentsSkipped += bucket.SegmentsSkipped
+		aggregate.PlaylistTrimErrors += bucket.PlaylistTrimErrors
 		aggregate.Bytes += bucket.Bytes
 		for status, count := range bucket.Statuses {
 			aggregate.Statuses[status] += count
 		}
 		for status, count := range bucket.GRPCStatuses {
 			aggregate.GRPCStatuses[status] += count
+		}
+		for route, count := range bucket.Routes {
+			aggregate.Routes[route] += count
 		}
 		for quality, count := range bucket.ActualQualities {
 			aggregate.ActualQualities[quality] += count
@@ -476,7 +519,12 @@ func windowFromAggregate(aggregate metricAggregate) windowSnapshot {
 		Fallbacks:          int(aggregate.Fallbacks),
 		FallbackRecoveries: int(aggregate.FallbackRecoveries),
 		CandidateExhausted: int(aggregate.CandidateExhausted),
+		LivePlaylists:      int(aggregate.LivePlaylists),
+		PlaylistTrims:      int(aggregate.PlaylistTrims),
+		SegmentsSkipped:    int(aggregate.SegmentsSkipped),
+		PlaylistTrimErrors: int(aggregate.PlaylistTrimErrors),
 		ActualQualities:    make(map[string]int),
+		Routes:             make(map[string]int),
 		Statuses:           make(map[string]int),
 	}
 	denominator := aggregate.Success + aggregate.Failed
@@ -485,6 +533,9 @@ func windowFromAggregate(aggregate metricAggregate) windowSnapshot {
 	}
 	for quality, count := range aggregate.ActualQualities {
 		window.ActualQualities[strconv.Itoa(quality)] = int(count)
+	}
+	for route, count := range aggregate.Routes {
+		window.Routes[route] = int(count)
 	}
 	for status, count := range aggregate.Statuses {
 		if count > 0 {

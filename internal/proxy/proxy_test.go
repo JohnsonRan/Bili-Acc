@@ -827,6 +827,28 @@ func TestLivePlayurlRequestsHighestQuality(t *testing.T) {
 	}
 }
 
+func TestLivePlayurlDisablesCaching(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cache-Control") != "no-cache" || r.Header.Get("Pragma") != "no-cache" {
+			t.Fatalf("cache headers = %v", r.Header)
+		}
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		w.Header().Set("Age", "30")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"data":{"quality":10000}}`)
+	}))
+	defer upstream.Close()
+
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.client.Transport = transportTo(upstream)
+	request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id=1"), nil)
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Age") != "" {
+		t.Fatalf("status=%d headers=%v", response.Code, response.Header())
+	}
+}
+
 func TestPlayurlResponseRegistersFallbackGroupsAndLogsActualQuality(t *testing.T) {
 	upstreamBody := `{"code":0,"data":{"quality":120,"accept_quality":[127,120,80],"dash":{"video":[{"id":120,"codecs":"hev1.1.6.L150.90","baseUrl":"https://upos-sz-mirrorali.bilivideo.com/video.m4s?sig=1","backupUrl":["https://upos-sz-302ppio.bilivideo.com/video.m4s?sig=2"]},{"id":80,"codecs":"avc1.640032","baseUrl":"https://cdn.bilivideo.com/1080.m4s?sig=3"}]}}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -939,6 +961,9 @@ func TestPlaylistRangeIsRemovedAndPartialResponseRejected(t *testing.T) {
 		if got := r.Header.Get("Range"); got != "" {
 			t.Fatalf("Range = %q", got)
 		}
+		if r.Header.Get("Cache-Control") != "no-cache" || r.Header.Get("Pragma") != "no-cache" {
+			t.Fatalf("cache headers = %v", r.Header)
+		}
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.WriteHeader(http.StatusPartialContent)
 		_, _ = io.WriteString(w, "segment.ts")
@@ -947,12 +972,42 @@ func TestPlaylistRangeIsRemovedAndPartialResponseRejected(t *testing.T) {
 
 	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
 	app.client.Transport = transportTo(upstream)
-	request := httptest.NewRequest(http.MethodGet, proxyPath("/proxy/", testToken, "http://live.bilivideo.com/index.m3u8"), nil)
+	request := httptest.NewRequest(http.MethodGet, proxyPath("/proxy/", testToken, "http://live.bilivideo.com/live-stream"), nil)
+	request.Header.Set("Accept", "application/vnd.apple.mpegurl")
 	request.Header.Set("Range", "bytes=0-100")
 	response := httptest.NewRecorder()
 	app.ServeHTTP(response, request)
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d", response.Code)
+	}
+}
+
+func TestLivePlaylistResponseIsTrimmedAndNotCached(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		w.Header().Set("Age", "30")
+		_, _ = io.WriteString(w, "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:4,\n10.ts\n#EXTINF:4,\n11.ts\n#EXTINF:4,\n12.ts\n#EXTINF:4,\n13.ts\n")
+	}))
+	defer upstream.Close()
+
+	now := time.Unix(1_700_000_000, 0)
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.now = func() time.Time { return now }
+	app.metrics = newMetricsStore(now)
+	app.client.Transport = transportTo(upstream)
+	request := httptest.NewRequest(http.MethodGet, proxyPath("/proxy/", testToken, "http://live.bilivideo.com/index.m3u8"), nil)
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Age") != "" {
+		t.Fatalf("status=%d headers=%v", response.Code, response.Header())
+	}
+	if strings.Contains(response.Body.String(), "10.ts") || !strings.Contains(response.Body.String(), "#EXT-X-MEDIA-SEQUENCE:11") {
+		t.Fatalf("playlist = %q", response.Body.String())
+	}
+	window := app.metrics.snapshot(now).Windows["1m"]
+	if window.LivePlaylists != 1 || window.PlaylistTrims != 1 || window.SegmentsSkipped != 1 || window.PlaylistTrimErrors != 0 {
+		t.Fatalf("window = %+v", window)
 	}
 }
 
@@ -1093,6 +1148,34 @@ func (b *blockingReadCloser) Close() error {
 		close(b.closed)
 	}
 	return nil
+}
+
+func TestLivePlaylistKeepsLatestCompleteSegments(t *testing.T) {
+	body := "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-KEY:METHOD=AES-128,URI=\"old.key\"\n#EXT-X-PROGRAM-DATE-TIME:2026-08-13T23:59:40Z\n#EXTINF:4,\n100.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\n101.ts\n#EXT-X-KEY:METHOD=AES-128,URI=\"new.key\"\n#EXTINF:4,\n102.ts\n#EXTINF:4,\n103.ts\n#EXTINF:4,\n104.ts\n#EXT-X-PROGRAM-DATE-TIME:2026-08-14T00:00:00Z\n#EXTINF:4,\n105.ts\n"
+	trimmed, result := trimLivePlaylist(body, 3)
+	if !result.Live || !result.Trimmed || result.Skipped != 3 || result.Malformed {
+		t.Fatalf("result = %+v", result)
+	}
+	for _, expected := range []string{"#EXT-X-MEDIA-SEQUENCE:103", "#EXT-X-DISCONTINUITY-SEQUENCE:1", "URI=\"new.key\"", "103.ts", "104.ts", "105.ts", "#EXT-X-PROGRAM-DATE-TIME"} {
+		if !strings.Contains(trimmed, expected) {
+			t.Fatalf("trimmed playlist missing %q: %q", expected, trimmed)
+		}
+	}
+	for _, removed := range []string{"100.ts", "101.ts", "102.ts", "old.key", "23:59:40Z"} {
+		if strings.Contains(trimmed, removed) {
+			t.Fatalf("trimmed playlist retained %q: %q", removed, trimmed)
+		}
+	}
+}
+
+func TestNonSlidingPlaylistsAreNotTrimmed(t *testing.T) {
+	for _, marker := range []string{"#EXT-X-ENDLIST", "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-BYTERANGE:100", "#EXT-X-MAP:URI=\"init.mp4\""} {
+		body := "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n" + marker + "\n#EXTINF:4,\n1.ts\n#EXTINF:4,\n2.ts\n#EXTINF:4,\n3.ts\n#EXTINF:4,\n4.ts\n"
+		trimmed, result := trimLivePlaylist(body, 3)
+		if trimmed != body || result.Live || result.Trimmed {
+			t.Fatalf("marker=%q trimmed=%q result=%+v", marker, trimmed, result)
+		}
+	}
 }
 
 func TestPlaylistRewrite(t *testing.T) {

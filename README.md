@@ -218,6 +218,8 @@ POST /playurl-grpc/{token}/{base64url(origin)}/bilibili.app.playerunite.v1.Playe
 
 playlist 中出现不在媒体白名单内的目标时，整个请求返回 `502`。上游若对 playlist 返回 `206`，服务同样返回 `502`，因为局部 playlist 无法安全改写。
 
+直播 playurl 和 playlist 请求会绕过缓存；响应设置为 `no-store`。普通滑动 HLS playlist 仅保留最新 3 个完整分片，并同步调整媒体与 discontinuity sequence，使播放尽量靠近 live edge。为避免破坏协议语义，VOD、EVENT、byte-range 和包含 `EXT-X-MAP` 的 playlist 只做 URL 改写，不裁剪分片。诊断页会显示最近 15 分钟的直播 playlist、裁剪和跳过分片计数。
+
 ## 配置
 
 配置通过环境变量传入：
