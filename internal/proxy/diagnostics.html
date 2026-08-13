@@ -129,8 +129,11 @@
       <div id="windows"></div>
     </article>
     <article class="panel qualities">
-      <div class="section-head"><h2>Delivered quality</h2><span>playurl responses · 15m</span></div>
-      <div id="qualities" class="status-list"></div>
+      <div class="section-head"><h2>Playurl quality</h2><span>JSON responses · 15m</span></div>
+      <div class="signal-columns">
+        <section><div class="section-head"><h2>Video</h2><span>reported current quality</span></div><div id="video-qualities" class="status-list"></div></section>
+        <section><div class="section-head"><h2>Live</h2><span>reported current quality</span></div><div id="live-qualities" class="status-list"></div></section>
+      </div>
     </article>
     <article class="panel statuses">
       <div class="signal-columns">
@@ -215,9 +218,12 @@
       row.append(name, track, success, latency, issues); windows.append(row);
     });
 
-    const qualities = {10000:'Original',400:'Blu-ray',250:'Ultra HD',150:'HD',80:'1080P',64:'720P',127:'8K',126:'Dolby',125:'HDR',120:'4K',116:'1080P60'};
-    const qualityEntries = Object.entries(fifteen.actual_qualities || {}).sort((a,b) => b[1]-a[1]).map(([key,value]) => [qualities[key] || `QN ${key}`, value]);
-    barList($('qualities'), qualityEntries, qualityEntries.reduce((sum, item) => sum + item[1], 0));
+    const renderQualities = (id, values) => {
+      const entries = Object.entries(values || {}).sort((a,b) => b[1]-a[1]);
+      barList($(id), entries, entries.reduce((sum, item) => sum + item[1], 0));
+    };
+    renderQualities('video-qualities', fifteen.video_qualities);
+    renderQualities('live-qualities', fifteen.live_qualities);
     const statuses = Object.entries(fifteen.statuses || {}).sort((a,b) => b[1]-a[1]);
     barList($('statuses'), statuses, fifteen.requests);
     const grpc = Object.entries(data.grpc_statuses || {}).sort((a,b) => b[1]-a[1]);

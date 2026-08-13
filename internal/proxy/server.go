@@ -70,7 +70,9 @@ type requestLog struct {
 	upstreamHeaderObserved bool
 	streamResult           string
 	qualityParams          string
+	playurlKind            string
 	actualQuality          int
+	qualityLabel           string
 	acceptQualities        string
 	videoQualities         string
 	videoCodecs            string
@@ -447,6 +449,11 @@ func (s *server) handlePlayurl(w http.ResponseWriter, r *http.Request) {
 	}
 	meta := requestLogFrom(r)
 	meta.targetHost = diagnosticHost(target.Hostname())
+	if isLivePlayurlPath(target.Path) {
+		meta.playurlKind = "live"
+	} else {
+		meta.playurlKind = "video"
+	}
 	if !allowedPlayurl(target) {
 		meta.errorStage = "target_validation"
 		http.Error(w, "Playurl API not allowed", http.StatusForbidden)
@@ -529,6 +536,7 @@ func (s *server) handlePlayurl(w http.ResponseWriter, r *http.Request) {
 		rewritten = body
 	}
 	meta.actualQuality = summary.Quality
+	meta.qualityLabel = summary.QualityLabel
 	meta.acceptQualities = summary.AcceptQualities
 	meta.videoQualities = summary.VideoQualities
 	meta.videoCodecs = summary.VideoCodecs

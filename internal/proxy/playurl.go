@@ -13,6 +13,7 @@ const maxPlayurlResponseSize = 8 << 20
 
 type playurlSummary struct {
 	Quality         int
+	QualityLabel    string
 	AcceptQualities string
 	VideoQualities  string
 	VideoCodecs     string
@@ -111,9 +112,30 @@ func summarizePlayurl(root any) playurlSummary {
 	summary := playurlSummary{}
 	qualitySet := make(map[int]bool)
 	codecSet := make(map[string]bool)
+	qualityLabels := make(map[int]string)
 	walkJSON(root, func(object map[string]any) {
+		if descriptions, ok := object["quality_description"].([]any); ok {
+			for _, value := range descriptions {
+				if description, ok := value.(map[string]any); ok {
+					if qn, label := jsonInt(description["qn"]), jsonString(description["desc"]); qn > 0 && label != "" {
+						qualityLabels[qn] = boundedToken(label, 48)
+					}
+				}
+			}
+		}
+		if qualities, ok := object["accept_quality"].([]any); ok {
+			if descriptions, ok := object["accept_description"].([]any); ok {
+				for index, value := range qualities {
+					if index < len(descriptions) {
+						if qn, label := jsonInt(value), jsonString(descriptions[index]); qn > 0 && label != "" {
+							qualityLabels[qn] = boundedToken(label, 48)
+						}
+					}
+				}
+			}
+		}
 		if summary.Quality == 0 {
-			for _, key := range []string{"quality", "current_qn", "qn"} {
+			for _, key := range []string{"quality", "current_qn", "current_quality"} {
 				if summary.Quality = jsonInt(object[key]); summary.Quality > 0 {
 					break
 				}
@@ -137,6 +159,7 @@ func summarizePlayurl(root any) playurlSummary {
 			}
 		}
 	})
+	summary.QualityLabel = qualityLabels[summary.Quality]
 	summary.VideoQualities = joinSortedInts(qualitySet)
 	codecs := make([]string, 0, len(codecSet))
 	for codec := range codecSet {
@@ -175,6 +198,11 @@ func jsonInt(value any) int {
 		return int(number)
 	}
 	return 0
+}
+
+func jsonString(value any) string {
+	text, _ := value.(string)
+	return text
 }
 
 func joinJSONInts(values []any) string {

@@ -829,13 +829,34 @@ func TestLivePlayurlRequestsHighestQuality(t *testing.T) {
 
 func TestSummarizeLivePlayurlQuality(t *testing.T) {
 	var root any
-	body := `{"code":0,"data":{"playurl_info":{"playurl":{"current_qn":10000,"accept_qn":[10000,400,250],"stream":[{"protocol_name":"http_hls","format":[{"format_name":"fmp4","codec":[{"codec_name":"av1","current_qn":10000,"base_url":"/live/index.m3u8","url_info":[{"host":"https://live.bilivideo.com","extra":"?qn=10000"}]}]}]}]}}}}`
+	body := `{"code":0,"data":{"playurl_info":{"playurl":{"current_qn":10000,"accept_qn":[30000,10000,400],"quality_description":[{"qn":30000,"desc":"杜比"},{"qn":10000,"desc":"原画"},{"qn":400,"desc":"蓝光"}],"stream":[{"protocol_name":"http_hls","format":[{"format_name":"fmp4","codec":[{"codec_name":"av1","current_qn":10000,"base_url":"/live/index.m3u8","url_info":[{"host":"https://live.bilivideo.com","extra":"?qn=10000"}]}]}]}]}}}}`
 	if err := json.Unmarshal([]byte(body), &root); err != nil {
 		t.Fatal(err)
 	}
 	summary := summarizePlayurl(root)
-	if summary.Quality != 10000 || summary.AcceptQualities != "10000,400,250" || summary.VideoCodecs != "av1" {
+	if summary.Quality != 10000 || summary.QualityLabel != "原画" || summary.AcceptQualities != "30000,10000,400" || summary.VideoCodecs != "av1" {
 		t.Fatalf("summary = %+v", summary)
+	}
+}
+
+func TestLivePlayurlQualityDescriptionDrivesMetrics(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"data":{"playurl_info":{"playurl":{"current_qn":10000,"accept_qn":[30000,10000],"quality_description":[{"qn":30000,"desc":"杜比"},{"qn":10000,"desc":"原画 1080P60"}]}}}}`)
+	}))
+	defer upstream.Close()
+
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	app.client.Transport = transportTo(upstream)
+	request := httptest.NewRequest(http.MethodGet, proxyPath("/playurl/", testToken, "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id=1"), nil)
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	window := app.metrics.snapshot(app.now()).Windows["1m"]
+	if window.LiveQualities["原画 1080P60"] != 1 || window.LiveQualities["杜比"] != 0 {
+		t.Fatalf("live qualities=%v", window.LiveQualities)
 	}
 }
 
@@ -910,8 +931,8 @@ func TestPlayurlResponseRegistersFallbackGroupsAndLogsActualQuality(t *testing.T
 			t.Fatalf("log leaked %q: %q", secret, logged)
 		}
 	}
-	if got := app.metrics.snapshot(app.now()).Windows["1m"].ActualQualities["120"]; got != 1 {
-		t.Fatalf("actual quality count = %d", got)
+	if got := app.metrics.snapshot(app.now()).Windows["1m"].VideoQualities["QN 120"]; got != 1 {
+		t.Fatalf("video quality count = %d", got)
 	}
 }
 

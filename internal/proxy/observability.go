@@ -97,7 +97,9 @@ type requestObservation struct {
 	Range                  bool
 	StreamResult           string
 	QualityParams          string
+	PlayurlKind            string
 	ActualQuality          int
+	QualityLabel           string
 	AcceptQualities        string
 	VideoQualities         string
 	VideoCodecs            string
@@ -144,7 +146,7 @@ type metricBucket struct {
 	Statuses           [600]uint64
 	GRPCStatuses       [grpcStatusSlots]uint64
 	Routes             map[string]uint64
-	ActualQualities    map[int]uint64
+	PlayurlQualities   map[string]uint64
 	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
 	Hosts              map[string]hostCounters
 }
@@ -162,6 +164,18 @@ func newMetricsStore(now time.Time) *metricsStore {
 		started:      now,
 		recentErrors: make([]recentError, 0, maxRecentErrors),
 	}
+}
+
+func playurlQualityLabel(observation requestObservation) string {
+	label := boundedToken(observation.QualityLabel, 48)
+	if label == "" {
+		label = "QN " + strconv.Itoa(observation.ActualQuality)
+	}
+	kind := observation.PlayurlKind
+	if kind != "live" {
+		kind = "video"
+	}
+	return kind + "\x00" + label
 }
 
 func (m *metricsStore) record(observation requestObservation) {
@@ -197,7 +211,7 @@ func (m *metricsStore) record(observation requestObservation) {
 		bucket.GRPCStatuses[grpcStatusIndex(observation.GRPCStatus)]++
 	}
 	if observation.Route == "playurl" && observation.ActualQuality > 0 {
-		bucket.ActualQualities[observation.ActualQuality]++
+		bucket.PlayurlQualities[playurlQualityLabel(observation)]++
 	}
 	if observation.UpstreamHeaderObserved {
 		bucket.LatencyBuckets[latencyBucketIndex(observation.UpstreamHeaderMS)]++
@@ -293,7 +307,7 @@ func (m *metricsStore) bucketLocked(second int64) *metricBucket {
 	}
 	bucket := &m.buckets[index]
 	if bucket.Second != second {
-		*bucket = metricBucket{Second: second, Hosts: make(map[string]hostCounters), Routes: make(map[string]uint64), ActualQualities: make(map[int]uint64)}
+		*bucket = metricBucket{Second: second, Hosts: make(map[string]hostCounters), Routes: make(map[string]uint64), PlayurlQualities: make(map[string]uint64)}
 	} else {
 		if bucket.Hosts == nil {
 			bucket.Hosts = make(map[string]hostCounters)
@@ -301,8 +315,8 @@ func (m *metricsStore) bucketLocked(second int64) *metricBucket {
 		if bucket.Routes == nil {
 			bucket.Routes = make(map[string]uint64)
 		}
-		if bucket.ActualQualities == nil {
-			bucket.ActualQualities = make(map[int]uint64)
+		if bucket.PlayurlQualities == nil {
+			bucket.PlayurlQualities = make(map[string]uint64)
 		}
 	}
 	return bucket
@@ -346,7 +360,8 @@ type windowSnapshot struct {
 	PlaylistTrims       int            `json:"playlist_trims"`
 	SegmentsSkipped     int            `json:"segments_skipped"`
 	PlaylistTrimErrors  int            `json:"playlist_trim_errors"`
-	ActualQualities     map[string]int `json:"actual_qualities"`
+	VideoQualities      map[string]int `json:"video_qualities"`
+	LiveQualities       map[string]int `json:"live_qualities"`
 	Routes              map[string]int `json:"routes"`
 	Statuses            map[string]int `json:"statuses"`
 	UpstreamHeaderP50MS int64          `json:"upstream_header_p50_ms"`
@@ -394,7 +409,7 @@ type metricAggregate struct {
 	Statuses           [600]uint64
 	GRPCStatuses       [grpcStatusSlots]uint64
 	Routes             map[string]uint64
-	ActualQualities    map[int]uint64
+	PlayurlQualities   map[string]uint64
 	LatencyBuckets     [len(latencyBoundsMS) + 1]uint64
 	Hosts              map[string]hostCounters
 }
@@ -443,7 +458,7 @@ func (m *metricsStore) window(now time.Time, duration time.Duration) windowSnaps
 }
 
 func (m *metricsStore) aggregateLocked(now time.Time, seconds int, includeHosts bool) metricAggregate {
-	aggregate := metricAggregate{Routes: make(map[string]uint64), ActualQualities: make(map[int]uint64)}
+	aggregate := metricAggregate{Routes: make(map[string]uint64), PlayurlQualities: make(map[string]uint64)}
 	if includeHosts {
 		aggregate.Hosts = make(map[string]hostCounters)
 	}
@@ -478,8 +493,8 @@ func (m *metricsStore) aggregateLocked(now time.Time, seconds int, includeHosts 
 		for route, count := range bucket.Routes {
 			aggregate.Routes[route] += count
 		}
-		for quality, count := range bucket.ActualQualities {
-			aggregate.ActualQualities[quality] += count
+		for quality, count := range bucket.PlayurlQualities {
+			aggregate.PlayurlQualities[quality] += count
 		}
 		for latency, count := range bucket.LatencyBuckets {
 			aggregate.LatencyBuckets[latency] += count
@@ -523,7 +538,8 @@ func windowFromAggregate(aggregate metricAggregate) windowSnapshot {
 		PlaylistTrims:      int(aggregate.PlaylistTrims),
 		SegmentsSkipped:    int(aggregate.SegmentsSkipped),
 		PlaylistTrimErrors: int(aggregate.PlaylistTrimErrors),
-		ActualQualities:    make(map[string]int),
+		VideoQualities:     make(map[string]int),
+		LiveQualities:      make(map[string]int),
 		Routes:             make(map[string]int),
 		Statuses:           make(map[string]int),
 	}
@@ -531,8 +547,16 @@ func windowFromAggregate(aggregate metricAggregate) windowSnapshot {
 	if denominator > 0 {
 		window.SuccessRate = float64(aggregate.Success) * 100 / float64(denominator)
 	}
-	for quality, count := range aggregate.ActualQualities {
-		window.ActualQualities[strconv.Itoa(quality)] = int(count)
+	for quality, count := range aggregate.PlayurlQualities {
+		kind, label, ok := strings.Cut(quality, "\x00")
+		if !ok {
+			continue
+		}
+		if kind == "live" {
+			window.LiveQualities[label] += int(count)
+		} else {
+			window.VideoQualities[label] += int(count)
+		}
 	}
 	for route, count := range aggregate.Routes {
 		window.Routes[route] = int(count)
@@ -680,7 +704,9 @@ func (s *server) completeRequest(r *http.Request, writer *loggingResponseWriter,
 		Range:                  r.Header.Get("Range") != "",
 		StreamResult:           streamResult,
 		QualityParams:          qualityParams,
+		PlayurlKind:            meta.playurlKind,
 		ActualQuality:          meta.actualQuality,
+		QualityLabel:           boundedToken(meta.qualityLabel, 48),
 		AcceptQualities:        boundedToken(meta.acceptQualities, 128),
 		VideoQualities:         boundedToken(meta.videoQualities, 128),
 		VideoCodecs:            boundedToken(meta.videoCodecs, 128),
@@ -762,9 +788,12 @@ func (s *server) logRequest(observation requestObservation, remote string) {
 		attributes = append(attributes, "range", observation.Range, "stream_result", observation.StreamResult)
 	}
 	if observation.Route == "playurl" {
-		attributes = append(attributes, "quality_params", observation.QualityParams)
+		attributes = append(attributes, "quality_params", observation.QualityParams, "playurl_kind", observation.PlayurlKind)
 		if observation.ActualQuality > 0 {
 			attributes = append(attributes, "actual_quality", observation.ActualQuality)
+		}
+		if observation.QualityLabel != "" {
+			attributes = append(attributes, "quality_label", observation.QualityLabel)
 		}
 		if observation.AcceptQualities != "" {
 			attributes = append(attributes, "accept_quality", observation.AcceptQualities)
