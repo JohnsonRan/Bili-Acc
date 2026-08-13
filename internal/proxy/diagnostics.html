@@ -54,6 +54,8 @@
     .metric small { color: var(--muted); }
     .windows { grid-column: span 7; padding: 22px; }
     .qualities { grid-column: span 5; padding: 22px; }
+    .qualities .signal-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .qualities .status-item { grid-template-columns: max-content 1fr auto; }
     .statuses { grid-column: 1 / -1; padding: 22px; }
     .signal-columns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
     .hosts, .errors { grid-column: 1 / -1; padding: 22px; overflow: hidden; }
@@ -95,6 +97,7 @@
       header { align-items: start; flex-direction: column; }
       .metric { grid-column: 1 / -1; min-height: 108px; }
       .section-head { align-items: flex-start; }
+      .qualities .signal-columns { grid-template-columns: 1fr; }
       .live-edge { align-items: flex-end; flex-direction: column; gap: 3px; }
       .window-row { grid-template-columns: 42px 1fr 62px 70px; }
       .window-row .latency { display: none; }
