@@ -904,6 +904,26 @@ func TestPlaylistRequiresConfiguredPublicURL(t *testing.T) {
 	}
 }
 
+func TestCredentialedCORSPreflight(t *testing.T) {
+	app := newServer(testToken, "https://proxy.example", defaultMediaHosts)
+	request := httptest.NewRequest(http.MethodOptions, "/playurl/anything", nil)
+	request.Header.Set("Origin", "https://www.bilibili.com")
+	request.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	request.Header.Set("Access-Control-Request-Headers", "X-Bili-Cookie, X-Bili-Referer")
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://www.bilibili.com" {
+		t.Fatalf("origin = %q", got)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("credentials = %q", got)
+	}
+}
+
 func TestUpstreamCannotOverrideCORS(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "https://evil.example")

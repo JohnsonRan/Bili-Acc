@@ -195,6 +195,9 @@ func setCORS(w http.ResponseWriter, r *http.Request) {
 	}
 	if origin != "" {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
+		if origin != "*" {
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 	}
 	w.Header().Set("Vary", "Origin")
 	methods := "GET, HEAD, OPTIONS"
